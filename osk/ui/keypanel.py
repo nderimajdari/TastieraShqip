@@ -13,9 +13,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QWidget
 
 from ..layouts.albanian import Key
+from . import theme
 from .keycap import KeyCap
-
-GAP = 3
 
 
 class UnitGrid(QWidget):
@@ -66,10 +65,13 @@ class UnitGrid(QWidget):
                            repeat_rate=repeat_rate)
         for cap, _x, _y in self._caps:
             cap.configure(**self._style)
+        # A skin change arrives through here and may have changed the spacing,
+        # which no resize event would otherwise pick up.
+        self._relayout()
 
-    def set_modifier_state(self, shift: bool, altgr: bool) -> None:
+    def set_modifier_state(self, shift: bool, altgr: bool, caps: bool = False) -> None:
         for cap, _x, _y in self._caps:
-            cap.set_modifier_state(shift, altgr)
+            cap.set_modifier_state(shift, altgr, caps)
 
     def caps_for_action(self, action: str) -> list[KeyCap]:
         return [cap for cap, _x, _y in self._caps if cap.key.action == action]
@@ -84,15 +86,35 @@ class UnitGrid(QWidget):
             return
         unit_w = self.width() / self.width_units
         unit_h = self.height() / self.row_count
+        # The spacing between keycaps belongs to the design: a flat board sets
+        # its keys well apart, a mechanical one packs them together.
+        gap = round(theme.skin().gap)
         for cap, x, y in self._caps:
             cap.set_unit_size(unit_w, unit_h)
             cap.setGeometry(
                 round(x * unit_w),
                 round(y * unit_h),
-                max(1, round(cap.key.w * unit_w) - GAP),
-                max(1, round(cap.key.h * unit_h) - GAP),
+                max(1, round(cap.key.w * unit_w) - gap),
+                max(1, round(cap.key.h * unit_h) - gap),
             )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._relayout()
+
+    # -- backlighting ------------------------------------------------------
+
+    def lit_rects(self):
+        """Every keycap's rectangle and corner radius, for the glow overlay.
+
+        In window coordinates, not this panel's: the overlay spans the whole
+        board and the panels are only part of it.
+        """
+        # isVisibleTo, not isVisible: the light is first traced while the
+        # window is still being built and nothing is on screen yet, but a
+        # hidden navigation pane must still be left out.
+        if not self.isVisibleTo(self.window()):
+            return []
+        offset = self.mapTo(self.window(), self.rect().topLeft())
+        return [(cap.geometry().translated(offset), cap.radius)
+                for cap, _x, _y in self._caps]

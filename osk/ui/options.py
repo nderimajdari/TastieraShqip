@@ -8,9 +8,11 @@ language is one more barrier.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox,
-    QLabel, QMessageBox, QPushButton, QSlider, QSpinBox, QTextBrowser, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout,
+    QGroupBox, QLabel, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__
@@ -40,20 +42,60 @@ class OptionsDialog(QDialog):
         self.settings = settings
         self.engine = engine
         self.setWindowTitle(f"{APP_NAME} — Opsionet")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(540)
+        #: Explanatory labels, which are coloured by hand and so have to be
+        #: recoloured by hand when a change in here repaints everything else.
+        self._faint_labels: list[QLabel] = []
 
-        layout = QVBoxLayout(self)
+        # The settings run past the height of a small laptop screen, and a
+        # dialog taller than the display is a dialog whose Close button cannot
+        # be reached -- so the groups scroll and the button stays put below
+        # them. The dialog still opens at its natural size when there is room.
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(12)
         layout.addWidget(self._prediction_group())
         layout.addWidget(self._accessibility_group())
         layout.addWidget(self._appearance_group())
+        layout.addStretch(1)
 
-        layout.addWidget(close_box(self))
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.viewport().setAutoFillBackground(False)
+        inner.setAutoFillBackground(False)
+
+        outer = QVBoxLayout(self)
+        outer.addWidget(scroll, 1)
+        outer.addWidget(close_box(self))
+
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            room = screen.availableGeometry().height() - 60
+            self.resize(self.width(),
+                        min(inner.sizeHint().height() + 70, room))
 
     # -- helpers -----------------------------------------------------------
 
     def _changed(self) -> None:
         self.settings_changed.emit()
+        self._restyle_faint()
+
+    def _faint(self, text: str) -> QLabel:
+        """A dimmed explanatory label that follows later theme changes."""
+        label = QLabel(text)
+        label.setWordWrap(True)
+        self._faint_labels.append(label)
+        label.setStyleSheet(f"color:{theme.palette().text_faint};")
+        return label
+
+    def _restyle_faint(self) -> None:
+        colour = theme.palette().text_faint
+        for label in self._faint_labels:
+            label.setStyleSheet(f"color:{colour};")
 
     def _checkbox(self, label: str, value: bool, attr: str) -> QCheckBox:
         box = QCheckBox(label)
@@ -139,20 +181,38 @@ class OptionsDialog(QDialog):
 
         grid.addWidget(QLabel("Rreshta sugjerimesh"), 4, 0)
         grid.addWidget(self._spin("suggestion_rows", 1, 3, s.suggestion_rows), 4, 1)
-        hint = QLabel("Më shumë rreshta = më shumë fjalë për të zgjedhur,\n"
-                      "por edhe më shumë vend të zënë në ekran.")
-        hint.setStyleSheet(f"color:{theme.palette().text_faint};")
-        grid.addWidget(hint, 4, 2)
+        grid.addWidget(self._faint("Më shumë rreshta = më shumë fjalë për të\n"
+                                   "zgjedhur, por edhe më shumë vend të zënë."), 4, 2)
+
+        # The suggestion buttons are sized apart from the keys: they are read
+        # rather than aimed at from memory, and somebody who enlarged the keys
+        # to hit them may well want the words smaller to see more at once.
+        grid.addWidget(QLabel("Lartësia e butonave"), 5, 0)
+        slider, readout = self._slider("suggestion_height", 22, 96,
+                                       s.suggestion_height, " px")
+        grid.addWidget(slider, 5, 1)
+        grid.addWidget(readout, 5, 2)
+
+        grid.addWidget(QLabel("Madhësia e fjalëve"), 6, 0)
+        slider, readout = self._slider("suggestion_font_scale", 6, 25,
+                                       int(round(s.suggestion_font_scale * 10)),
+                                       "×", 0.1)
+        grid.addWidget(slider, 6, 1)
+        grid.addWidget(readout, 6, 2)
+
+        grid.addWidget(self._faint(
+            "Të njëjtat rregullohen edhe me « − » dhe « + » në cepin e djathtë "
+            "të rreshtit të sugjerimeve, pa hapur këtë dritare."), 7, 0, 1, 3)
 
         clear = QPushButton("Fshi fjalorin tim personal")
         clear.clicked.connect(self._clear_user_model)
-        grid.addWidget(clear, 5, 0, 1, 3)
+        grid.addWidget(clear, 8, 0, 1, 3)
 
         words = self.engine.user.unigram
-        info = QLabel(f"Fjalor personal: {len(words):,} fjalë  •  "
-                      f"Fjalor shqip: {self.engine.model.vocabulary_size:,} fjalë")
-        info.setStyleSheet(f"color:{theme.palette().text_faint};")
-        grid.addWidget(info, 6, 0, 1, 3)
+        grid.addWidget(self._faint(
+            f"Fjalor personal: {len(words):,} fjalë  •  "
+            f"Fjalor shqip: {self.engine.model.vocabulary_size:,} fjalë"),
+            9, 0, 1, 3)
         return box
 
     def _clear_user_model(self) -> None:
@@ -200,40 +260,72 @@ class OptionsDialog(QDialog):
         grid = QGridLayout(box)
         s = self.settings
 
-        grid.addWidget(QLabel("Ngjyrat"), 0, 0)
+        # The design comes first: it decides the colours, so the controls it
+        # takes over should be the ones underneath it.
+        grid.addWidget(QLabel("Dizajni i tastierës"), 0, 0)
+        skins = self._combo(
+            "skin", [(key, sk.label) for key, sk in theme.SKINS.items()], s.skin)
+        grid.addWidget(skins, 0, 1, 1, 2)
+
+        self._skin_note = self._faint("")
+        grid.addWidget(self._skin_note, 1, 0, 1, 3)
+
+        grid.addWidget(QLabel("Ngjyrat"), 2, 0)
         grid.addWidget(self._combo("theme", [("dark", "E errët"),
-                                             ("light", "E çelët")], s.theme), 0, 1)
+                                             ("light", "E çelët")], s.theme), 2, 1)
 
-        grid.addWidget(QLabel("Ngjyra e theksit"), 1, 0)
-        grid.addWidget(self._combo(
+        grid.addWidget(QLabel("Ngjyra e theksit"), 3, 0)
+        self._accent_combo = self._combo(
             "accent", [(key, label) for key, (label, _l, _d) in theme.ACCENTS.items()],
-            s.accent), 1, 1)
+            s.accent)
+        grid.addWidget(self._accent_combo, 3, 1)
+        self._rgb_box = self._checkbox("Drita RGB të lëvizë", s.rgb_animation,
+                                       "rgb_animation")
+        grid.addWidget(self._rgb_box, 4, 0, 1, 3)
 
-        grid.addWidget(QLabel("Madhësia e shkronjave"), 2, 0)
+        skins.currentIndexChanged.connect(lambda _i: self._describe_skin())
+        self._describe_skin()
+
+        grid.addWidget(QLabel("Madhësia e shkronjave"), 5, 0)
         slider, readout = self._slider("key_font_scale", 6, 20,
                                        int(round(s.key_font_scale * 10)), "×", 0.1)
-        grid.addWidget(slider, 2, 1)
-        grid.addWidget(readout, 2, 2)
+        grid.addWidget(slider, 5, 1)
+        grid.addWidget(readout, 5, 2)
 
-        grid.addWidget(QLabel("Tejdukshmëria"), 3, 0)
+        grid.addWidget(QLabel("Tejdukshmëria"), 6, 0)
         slider, readout = self._slider("opacity", 25, 100,
                                        int(round(s.opacity * 100)), "%", 0.01,
                                        display_scale=1.0)
-        grid.addWidget(slider, 3, 1)
-        grid.addWidget(readout, 3, 2)
+        grid.addWidget(slider, 6, 1)
+        grid.addWidget(readout, 6, 2)
 
-        grid.addWidget(QLabel("Tejdukshmëria kur zbehet"), 4, 0)
+        grid.addWidget(QLabel("Tejdukshmëria kur zbehet"), 7, 0)
         slider, readout = self._slider("faded_opacity", 15, 100,
                                        int(round(s.faded_opacity * 100)), "%", 0.01,
                                        display_scale=1.0)
-        grid.addWidget(slider, 4, 1)
-        grid.addWidget(readout, 4, 2)
+        grid.addWidget(slider, 7, 1)
+        grid.addWidget(readout, 7, 2)
 
         grid.addWidget(self._checkbox("Trego panelin e navigimit", s.nav_visible,
-                                      "nav_visible"), 5, 0, 1, 3)
+                                      "nav_visible"), 8, 0, 1, 3)
         grid.addWidget(self._checkbox("Fiksuar në fund të ekranit", s.docked,
-                                      "docked"), 6, 0, 1, 3)
+                                      "docked"), 9, 0, 1, 3)
         return box
+
+    def _describe_skin(self) -> None:
+        """Explain the chosen design, and say when it owns the accent colour.
+
+        A designed keyboard sets its own accent -- that colour is most of what
+        makes it recognisable -- so the accent control goes quiet rather than
+        silently doing nothing, which is the worse of the two.
+        """
+        skin = theme.SKINS.get(self.settings.skin, theme.SKINS["standard"])
+        note = skin.note
+        if skin.accent_locked:
+            note += "  (Ky dizajn e ka ngjyrën e vet të theksit.)"
+        self._skin_note.setText(note)
+        self._accent_combo.setEnabled(not skin.accent_locked)
+        self._rgb_box.setEnabled(skin.rgb)
 
 
 def help_html() -> str:
@@ -257,6 +349,10 @@ instaluar tastiera shqipe.</li>
 <li><b>Shift, Ctrl, Alt, AltGr</b> janë ngjitëse: shtypini një herë për tastin
 tjetër, dy herë për t'i mbyllur (shfaqet një pikë e bardhë), tri herë për t'i
 liruar. Kështu Ctrl+C bëhet me një gisht të vetëm.</li>
+<li><b>Shift</b> jep shkronjën e madhe — edhe <b>Ë</b> dhe <b>Ç</b> — dhe
+shenjën e dytë të tastit (p.sh. <i>;</i> mbi presje).</li>
+<li><b>Caps</b> prek vetëm shkronjat: me të ndezur, presja mbetet presje.
+Shift bashkë me Caps kthen shkronjën e vogël.</li>
 <li><b>Fn</b> ndërron rreshtin e numrave me F1–F12.</li>
 </ul>
 
@@ -268,12 +364,31 @@ dhe fjala shkruhet e tëra.</li>
 <li>Numrin e rreshtave (1–3) dhe të fjalëve për rresht i caktoni te
 <b>Opsionet → Parashikimi i fjalëve</b>. Rreshti i parë përmban hamendjen më të
 mirë; rreshtat e tjerë kapin fjalët që ai nuk i gjen.</li>
+<li><b>Butonat « − » dhe « + »</b> në cepin e djathtë të sugjerimeve i zmadhojnë
+ose i zvogëlojnë ato aty për aty, pa hapur Opsionet. Madhësia e tyre është e
+ndarë nga ajo e tasteve.</li>
 <li>Nuk keni nevojë të shkruani theksat: <i>shqiperi</i> ju ofron
 <i>Shqipëri</i>.</li>
 <li>Gabimet e vogla falen: një shkronjë e tepërt ose e ndërruar prapëseprapë
 gjen fjalën.</li>
 <li>Tastiera <b>mëson fjalët tuaja</b> — emrat, vendet, shprehjet që përdorni —
 dhe i ngre lart në listë. Gjithçka ruhet vetëm në kompjuterin tuaj.</li>
+</ul>
+
+<h3>Dizajni</h3>
+<ul>
+<li>Gjashtë pamje të ndryshme: <b>Standarde</b>, <b>Slim aluminium</b>,
+<b>Gaming — kuqezi</b>, <b>RGB neon</b>, <b>Mekanike</b> dhe
+<b>Makinë shkrimi</b>.</li>
+<li><b>RGB neon</b> i ndriçon tastet nga poshtë me dritë që rrjedh ngadalë nëpër
+tastierë. Nëse ju shpërqendron, ndaleni te <b>Opsionet → Pamja → Drita RGB të
+lëvizë</b>; ngjyrat mbeten, vetëm lëvizja ndalet.</li>
+<li>Ndërrohen kurdo — nga <b>Opsionet → Pamja → Dizajni i tastierës</b>, ose me
+butonin e dizajnit në shiritin e sipërm, që i kalon me radhë.</li>
+<li>Secila ka variantin e vet të errët dhe të çelët; butoni <b>☼</b> i ndërron.
+Dizajnet e veçanta e mbajnë ngjyrën e vet të theksit.</li>
+<li>Pamjet janë punuar posaçërisht për këtë program dhe nuk kanë lidhje me asnjë
+markë.</li>
 </ul>
 
 <h3>Për përdorim me lëvizje të kufizuar</h3>
@@ -292,7 +407,7 @@ kursorin mbi të, pa klikuar fare. E dobishme me mouse me kokë ose me sy.</li>
 <li>Dy klikime mbi shiritin e sipërm e fiksojnë ose e lirojnë nga fundi i
 ekranit.</li>
 <li><b>◧</b> fikson / liron, <b>◑</b> e zbeh, <b>☼</b> ndërron të errëtën me të
-çelëtën, <b>⚙</b> hap Opsionet.</li>
+çelëtën, <b>◈</b> ndërron dizajnin, <b>⚙</b> hap Opsionet.</li>
 <li><b>Mv Up / Mv Dn</b> — ngre ose ul tastierën që të mos mbulojë tekstin.</li>
 <li><b>Nav</b> — fsheh ose tregon panelin e djathtë.</li>
 </ul>

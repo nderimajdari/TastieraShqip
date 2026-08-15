@@ -27,8 +27,12 @@ name, your town and the phrases you use most rise to the top. It is stored only
 on your machine, in `%APPDATA%\ShqipKeyboard`, and can be erased from Options.
 
 **Goes where you want it.** Drag the top strip to move it, drag any edge or
-corner to resize it, double-click the strip to dock or release it. Dark and light
-themes, four accent colours, adjustable text size and opacity.
+corner to resize it, double-click the strip to dock or release it. Adjustable
+text size and opacity, and the suggestion buttons zoom from the bar itself.
+
+**Looks how you want it.** Six keyboard designs — plain, slim aluminium, red and
+black gaming, backlit RGB, deep mechanical, and a typewriter — each with a dark
+and a light variant, switchable at any moment from the header or from Options.
 
 **Opens immediately.** The window is on screen in under half a second; the
 dictionary loads behind it and the suggestions light up when it is ready.
@@ -39,11 +43,13 @@ dictionary loads behind it and the suggestions light up when it is ready.
 |---|---|
 | **Dwell selection** | Rest the pointer on a key and it presses itself — no click needed. For head mice, eye trackers and joysticks. |
 | **Sticky modifiers** | Shift/Ctrl/Alt/AltGr latch: press once for the next key, twice to lock, three times to release. Ctrl+C with one finger. |
+| **Caps Lock that behaves** | Caps Lock reaches letters only — the comma key still types a comma — and Shift inverts it rather than adding to it. |
 | **Hold to repeat** | Holding Backspace deletes continuously instead of demanding forty clicks. |
 | **No diacritics needed** | `shqiperi` offers `Shqipëri`. Hunting for Ë costs a slow typist real time. |
 | **Typo tolerance** | A doubled or transposed letter still finds the word — the errors tremor produces. |
 | **One to three prediction rows** | More rows means more words offered without hunting; fewer means less of the screen taken. Yours to choose. |
-| **Light theme** | An opaque dark slab over a white document is tiring to read past, and higher contrast suits some low-vision users. |
+| **Suggestions sized separately** | Predictions are read, not aimed at from memory; someone who enlarged the keys to hit them may want the words smaller to see more at once. `−` and `+` sit on the bar itself, so it can be changed mid-sentence. |
+| **Light variant of every design** | An opaque dark slab over a white document is tiring to read past, and higher contrast suits some low-vision users — so no design is dark-only. |
 | **Four accent colours** | The accent marks hover, press and dwell progress — load-bearing signals somebody with colour vision deficiency may not otherwise distinguish. |
 | **Adjustable size, opacity, dwell time** | All in Options. Legends shrink to fit their key, so a large text size does not clip `Options` to `Optio`. |
 
@@ -87,10 +93,61 @@ makes it translucent, and `Nav` hides the right-hand pane.
 - **Resize** — drag any edge or corner. A docked keyboard spans the screen, so
   only its top edge (its height) is yours to change.
 - **Dock / release** — double-click the top strip, or use ◧.
-- The header also carries ◑ fade, ☀ light/dark and ⚙ Options.
+- The header also carries ◑ fade, ☀ light/dark, ◈ next design and ⚙ Options.
 
 Position and size are remembered between sessions, and a window left off-screen
 by a since-unplugged monitor is pulled back into view on the next start.
+
+## Designs
+
+Six of them, chosen from **Options → Pamja → Dizajni i tastierës** or stepped
+through with ◈ on the header. Each carries a dark and a light variant, so the
+theme button keeps working whichever one is on.
+
+![the six designs](docs/designs.png)
+
+| Design | What it looks like |
+|---|---|
+| **Standarde** | The plain one. The only design that takes your accent colour, since the others need their own. |
+| **Slim aluminium** | Flat, barely-shaded keys set well apart, thin lettering. Silver in light, graphite in dark. |
+| **Gaming — kuqezi** | Red on black, tight square keys, condensed capitals on the named keys. |
+| **RGB neon** | Dark caps lit from underneath, the colour drifting across the board as a slow diagonal wave. The legends stay white — the light is in the gaps, and never touches the thing you have to read. Freeze the drift in Options if it distracts; the colours stay. |
+| **Mekanike** | Deep moulded caps, heavy shadow, monospaced legends. Beige PBT in light. |
+| **Makinë shkrimi** | Cream round caps, serif legends, dark red accent; black bakelite body in dark. |
+
+A design is a `Skin` in [`osk/ui/theme.py`](osk/ui/theme.py): two palettes plus
+the corner radius, key spacing, shading depth, shadow, edge light, border width,
+typeface and weight. Adding one is a single entry in `SKINS` — no new painting
+code, because the painters read all of it from the current skin.
+
+### What the backlight costs
+
+Lighting each key from the key itself is the obvious implementation and it is
+unaffordable: 83 keycaps are 83 widgets, and repainting them all came to ~55 ms
+a frame — half a core, on a keyboard that sits on screen all day.
+
+[`osk/ui/backlight.py`](osk/ui/backlight.py) does it as one layer instead. The
+blooms are traced into a mask once per layout; each frame is then a single
+linear gradient composited through that mask. The part that actually matters is
+that the lit region is cut back to *outside* every keycap — Qt repaints a widget
+whenever the damaged region touches it, so one pixel of clearance is the
+difference between repainting nothing and repainting all 98 widgets.
+
+Measured on an idle window, 4-second samples, at ten frames a second:
+
+| | CPU |
+|---|---|
+| any design without a backlight | 0.0% of one core |
+| RGB, drift frozen | 0.0% |
+| RGB, drift running | **1.6%** |
+
+Ten frames a second sounds far too few until you notice that nothing moves —
+only the colour changes, about three degrees of hue per frame, which is below
+what the eye resolves.
+
+The designs are written for this program and drawn in the manner of keyboards
+people recognise. They carry no brand's name, marks or artwork, and are not
+affiliated with or endorsed by anyone.
 
 ## How prediction works
 
@@ -193,11 +250,18 @@ time. `BIGRAM_CAP` and `TRIGRAM_CAP` bound that; peak use is near 1.2 GB.
 
 ```powershell
 python tests/test_prediction.py
+python tests/test_keys.py
 ```
 
 48 tests over tokenisation, completion, next-word prediction, n-gram
 interpolation, diacritic folding, typo tolerance, sentence-boundary context,
 the recency cache and personal learning.
+
+22 more over the layout and the designs: what character each key produces under
+Shift, AltGr and Caps Lock, the latching modifiers, and every skin — including a
+contrast check that each design keeps its legends at least 4.5:1 against its own
+keycaps, since a keyboard that looks striking but cannot be read has failed at
+the only thing it is for.
 
 ## Layout of the source
 
@@ -216,9 +280,10 @@ osk/
     window.py               the keyboard window: painting, moving, resizing
     keycap.py               one drawn key: click, hold-repeat, dwell
     keypanel.py             unit-grid layout
-    suggestbar.py           the grid of prediction chips
+    suggestbar.py           the grid of prediction chips, with its own zoom
+    backlight.py            the RGB skin's light, as one masked layer
     options.py              Options and Help dialogs
-    theme.py                palettes, stylesheet, drawn icons
+    theme.py                palettes, the six skins, stylesheet, drawn icons
   winapi/
     sendinput.py            SendInput: Unicode text and virtual-key chords
     focus.py                no-focus-stealing window styles, focus tracking

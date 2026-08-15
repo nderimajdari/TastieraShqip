@@ -13,6 +13,13 @@ Three activation routes are supported, and every one of them matters to somebody
 * press-and-hold -- auto-repeat, so deleting a line does not mean 40 clicks;
 * dwell -- resting the pointer on the key selects it, for users driving a head
   mouse or eye tracker who cannot click at all.
+
+The corner radius, the depth of the shading, the shadow, the lit edge and the
+typeface all come from the current skin rather than from constants here, which
+is what lets one keyboard be a flat aluminium board and another a moulded
+mechanical one without a second painting routine. The RGB backlight is not here
+at all -- it is one layer over the whole board, in backlight.py, for reasons of
+cost set out there.
 """
 
 from __future__ import annotations
@@ -27,10 +34,15 @@ from ..layouts.albanian import Key
 from . import theme
 
 DWELL_TICK_MS = 25
-RADIUS = 8.0
 
 
 _mix = theme.mix   # hover and latch tints; shared with the suggestion chips
+
+#: Shading and fitted legend sizes, both keyed by their inputs. A lit skin
+#: repaints every key many times a second, and neither answer changes between
+#: frames; see _bevelled and _fitted_size.
+_BEVEL_CACHE: dict = {}
+_FIT_CACHE: dict = {}
 
 
 class KeyCap(QWidget):
@@ -56,6 +68,7 @@ class KeyCap(QWidget):
         self._unit_w = 0.0
         self._unit_h = 0.0
         self._shift = False
+        self._caps = False
         self._altgr = False
 
         self._repeat_enabled = True
@@ -91,10 +104,24 @@ class KeyCap(QWidget):
     def set_unit_size(self, unit_w: float, unit_h: float) -> None:
         self._unit_w, self._unit_h = unit_w, unit_h
 
-    def set_modifier_state(self, shift: bool, altgr: bool) -> None:
-        if (shift, altgr) != (self._shift, self._altgr):
-            self._shift, self._altgr = shift, altgr
+    @property
+    def radius(self) -> float:
+        """The corner radius this cap is drawn with, for the backlight layer."""
+        return min(theme.skin().radius, self.height() / 2.0)
+
+    def set_modifier_state(self, shift: bool, altgr: bool, caps: bool = False) -> None:
+        """Shift and Caps Lock are kept apart because they are not the same.
+
+        Caps Lock reaches letters only and inverts rather than forces, so the
+        key itself decides which of its two legends is the live one.
+        """
+        if (shift, altgr, caps) != (self._shift, self._altgr, self._caps):
+            self._shift, self._altgr, self._caps = shift, altgr, caps
             self.update()
+
+    @property
+    def _shifted(self) -> bool:
+        return self.key.shifted(self._shift, self._caps)
 
     def set_latched(self, latched: bool, locked: bool = False) -> None:
         if (latched, locked) != (self.latched, self.locked):
@@ -170,37 +197,59 @@ class KeyCap(QWidget):
     def _gradient(self, rect: QRectF) -> QLinearGradient:
         p = theme.palette()
         grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        if self._pressed:
-            grad.setColorAt(0.0, QColor(p.accent))
-            grad.setColorAt(1.0, QColor(p.accent_deep))
-        elif self.locked:
-            grad.setColorAt(0.0, QColor(p.accent))
-            grad.setColorAt(1.0, QColor(p.accent_deep))
+        if self._pressed or self.locked:
+            hi, lo = p.accent, p.accent_deep
         elif self.latched:
-            grad.setColorAt(0.0, _mix(p.key_hi, p.accent, 0.55))
-            grad.setColorAt(1.0, _mix(p.key_lo, p.accent_deep, 0.55))
-        elif self.key.role == "system":
-            hi, lo = p.system_hi, p.system_lo
-            if self._hover:
-                hi, lo = _mix(hi, p.accent, 0.22).name(), _mix(lo, p.accent, 0.22).name()
-            grad.setColorAt(0.0, QColor(hi))
-            grad.setColorAt(1.0, QColor(lo))
+            hi = _mix(p.key_hi, p.accent, 0.55).name()
+            lo = _mix(p.key_lo, p.accent_deep, 0.55).name()
         else:
-            hi, lo = p.key_hi, p.key_lo
+            if self.key.role == "system":
+                hi, lo = p.system_hi, p.system_lo
+                tint = 0.22
+            else:
+                hi, lo = p.key_hi, p.key_lo
+                tint = 0.28
             if self._hover:
-                hi, lo = _mix(hi, p.accent, 0.28).name(), _mix(lo, p.accent, 0.28).name()
-            grad.setColorAt(0.0, QColor(hi))
-            grad.setColorAt(1.0, QColor(lo))
+                hi = _mix(hi, p.accent, tint).name()
+                lo = _mix(lo, p.accent, tint).name()
+        top, bottom = self._bevelled(hi, lo)
+        grad.setColorAt(0.0, top)
+        grad.setColorAt(1.0, bottom)
         return grad
+
+    @staticmethod
+    def _bevelled(hi: str, lo: str) -> tuple[QColor, QColor]:
+        """Push the two ends of a key's shading apart, or flatten them together.
+
+        A flat board and a moulded one differ mostly in this one number, so the
+        skin gives it as a factor around the colours the palette already has
+        rather than as a second set of colours per skin.
+
+        Cached: there are four or five distinct key colourings on a board and
+        eighty-odd keys, so without this the same three interpolations are
+        recomputed eighty times a frame for an answer that never changes.
+        """
+        bevel = theme.skin().bevel
+        if bevel == 1.0:
+            return theme.colour(hi), theme.colour(lo)
+        key = (hi, lo, bevel)
+        cached = _BEVEL_CACHE.get(key)
+        if cached is None:
+            middle = _mix(hi, lo, 0.5).name()
+            cached = _BEVEL_CACHE[key] = (_mix(middle, hi, bevel),
+                                          _mix(middle, lo, bevel))
+        return cached
 
     def _text_colour(self) -> QColor:
         p = theme.palette()
         if self._pressed or self.locked:
             return QColor(p.on_accent)
-        return QColor(p.text)
+        return QColor(p.legend)
 
     def paintEvent(self, event) -> None:
         p = theme.palette()
+        s = theme.skin()
+        radius = min(s.radius, self.height() / 2.0)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
@@ -210,33 +259,34 @@ class KeyCap(QWidget):
             # into the space it occupied.
             rect.translate(0, 1.0)
 
-        if not self._pressed:
+        if not self._pressed and s.shadow > 0:
+            depth = max(1.0, 1.5 * s.shadow)
             shadow = QColor(p.shadow)
-            shadow.setAlpha(70 if p.name == "dark" else 40)
+            shadow.setAlpha(min(255, round((70 if p.name == "dark" else 40) * s.shadow)))
             shadow_path = QPainterPath()
-            shadow_path.addRoundedRect(rect.translated(0, 1.5), RADIUS, RADIUS)
+            shadow_path.addRoundedRect(rect.translated(0, depth), radius, radius)
             painter.fillPath(shadow_path, shadow)
 
         path = QPainterPath()
-        path.addRoundedRect(rect, RADIUS, RADIUS)
+        path.addRoundedRect(rect, radius, radius)
         painter.fillPath(path, self._gradient(rect))
 
         if self._dwell_progress > 0:
-            self._paint_dwell(painter, rect)
+            self._paint_dwell(painter, rect, radius)
 
-        border = QColor(p.accent) if self._hover and not self._pressed \
-            else QColor(p.key_border)
-        painter.setPen(QPen(border, 1.0))
+        border = QColor(p.accent) if self._hover and not self._pressed             else QColor(p.key_border)
+        painter.setPen(QPen(border, s.border))
         painter.drawPath(path)
 
         # A one-pixel lit line just inside the top edge; this is what makes the
         # key read as raised rather than as a coloured rectangle.
-        if not self._pressed:
+        if not self._pressed and s.edge > 0:
             edge = QColor(p.key_edge)
-            edge.setAlpha(150 if p.name == "dark" else 220)
+            base = 150 if p.name == "dark" else 220
+            edge.setAlpha(min(255, round(base * s.edge)))
             painter.setPen(QPen(edge, 1.0))
-            painter.drawLine(QPointF(rect.left() + RADIUS * 0.7, rect.top() + 1.0),
-                             QPointF(rect.right() - RADIUS * 0.7, rect.top() + 1.0))
+            painter.drawLine(QPointF(rect.left() + radius * 0.7, rect.top() + 1.0),
+                             QPointF(rect.right() - radius * 0.7, rect.top() + 1.0))
 
         ref_h = self._unit_h or rect.height()
         ref_w = self._unit_w or rect.width()
@@ -251,13 +301,13 @@ class KeyCap(QWidget):
             self._paint_lock_dot(painter, rect)
         painter.end()
 
-    def _paint_dwell(self, painter: QPainter, rect: QRectF) -> None:
+    def _paint_dwell(self, painter: QPainter, rect: QRectF, radius: float) -> None:
         p = theme.palette()
         fill = QRectF(rect)
         fill.setHeight(rect.height() * self._dwell_progress)
         fill.moveBottom(rect.bottom())
         clip = QPainterPath()
-        clip.addRoundedRect(rect, RADIUS, RADIUS)
+        clip.addRoundedRect(rect, radius, radius)
         painter.save()
         painter.setClipPath(clip)
         colour = QColor(p.accent)
@@ -270,48 +320,78 @@ class KeyCap(QWidget):
                          QPointF(fill.right(), fill.top()))
         painter.restore()
 
+    @staticmethod
+    def _fitted_size(font, label: str, available: float) -> float:
+        """The largest point size at which ``label`` still fits on the key.
+
+        Shrink a word that will not fit rather than let it run off the key:
+        "Options" and "PrtScn" are narrow keys with long names, and at a large
+        font scale -- which is exactly what a user with low vision selects --
+        the clipped remainder is unreadable.
+
+        Measuring text is the most expensive thing on this path, and the answer
+        depends only on the word, the space and the face, none of which change
+        between frames -- so it is measured once per combination.
+        """
+        size = font.pointSizeF()
+        key = (label, round(available), round(size, 1), font.family(),
+               int(font.weight()))
+        cached = _FIT_CACHE.get(key)
+        if cached is not None:
+            return cached
+        probe = QFont(font)
+        metrics = QFontMetricsF(probe)
+        while metrics.horizontalAdvance(label) > available and size > 6.0:
+            size -= 0.5
+            probe.setPointSizeF(size)
+            metrics = QFontMetricsF(probe)
+        _FIT_CACHE[key] = size
+        return size
+
     def _paint_label(self, painter: QPainter, rect: QRectF, base_size: float) -> None:
+        skin = theme.skin()
         label = self.key.label
-        font = QFont(self.font())
-        font.setPointSizeF(max(7.0, base_size * (0.58 if len(label) > 3 else 0.80)))
-        font.setWeight(QFont.DemiBold if len(label) <= 3 else QFont.Medium)
-        # Shrink a word that will not fit rather than let it run off the key.
-        # "Options" and "PrtScn" are narrow keys with long names, and at a large
-        # font scale -- which is exactly what a user with low vision selects --
-        # the clipped remainder is unreadable.
-        available = rect.width() - 8
-        metrics = QFontMetricsF(font)
-        while (metrics.horizontalAdvance(label) > available
-               and font.pointSizeF() > 6.0):
-            font.setPointSizeF(font.pointSizeF() - 0.5)
-            metrics = QFontMetricsF(font)
+        if skin.uppercase:
+            label = label.upper()
+        font = theme.key_font(
+            self.font(),
+            max(7.0, base_size * (0.58 if len(label) > 3 else 0.80)),
+            skin.weight + (100 if len(label) <= 3 else 0),
+        )
+        font.setPointSizeF(self._fitted_size(font, label, rect.width() - 8))
         painter.setFont(font)
-        painter.setPen(self._text_colour() if self._pressed or self.locked
-                       else QColor(theme.palette().text_dim))
+        if self._pressed or self.locked:
+            colour = self._text_colour()
+        else:
+            # Named keys sit back from the characters, but "dimmer" has to be
+            # measured against the keycap rather than against the window: on a
+            # skin with cream caps on a black body the two run in opposite
+            # directions.
+            p = theme.palette()
+            colour = _mix(p.legend, p.key_lo if p.key_text else p.window_lo, 0.34)
+        painter.setPen(colour)
         painter.drawText(rect, Qt.AlignCenter | Qt.TextSingleLine, label)
 
     def _paint_char_key(self, painter: QPainter, rect: QRectF,
                         base_size: float) -> None:
-        base = self.key.caption(self._shift, self._altgr)
+        shifted = self._shifted
+        base = self.key.caption(shifted, self._altgr)
         secondary = ""
         if self.key.shift and self.key.shift != base:
             secondary = self.key.shift
         if self._altgr and self.key.altgr:
             secondary = self.key.base
 
-        font = QFont(self.font())
-        font.setPointSizeF(max(8.0, base_size))
-        font.setWeight(QFont.Medium)
+        font = theme.key_font(self.font(), max(8.0, base_size))
         painter.setFont(font)
-        painter.setPen(self._text_colour())
         # Letters centre; keys carrying a second legend sit low, mirroring the
         # Windows keyboard where the shifted glyph occupies the top-left.
         target = rect if not secondary else rect.adjusted(0, rect.height() * 0.20, 0, 0)
+        painter.setPen(self._text_colour())
         painter.drawText(target, Qt.AlignCenter | Qt.TextSingleLine, base)
 
         if secondary:
-            small = QFont(self.font())
-            small.setPointSizeF(max(7.0, base_size * 0.60))
+            small = theme.key_font(self.font(), max(7.0, base_size * 0.60), 400)
             painter.setFont(small)
             colour = self._text_colour()
             colour.setAlpha(165)

@@ -87,11 +87,20 @@ class KeyController(QObject):
 
     @property
     def shift_active(self) -> bool:
-        return self.shift.active or self.caps_lock
+        return self.shift.active
 
     @property
     def altgr_active(self) -> bool:
         return self.altgr.active
+
+    def shifted(self, key: Key) -> bool:
+        """Whether ``key`` is at its shifted level right now.
+
+        Shift and Caps Lock combine differently per key -- Caps Lock reaches
+        letters only -- so the decision belongs to the key, not to a single
+        "shift is on" flag.
+        """
+        return key.shifted(self.shift.active, self.caps_lock)
 
     def _chord_modifiers(self) -> tuple[int, ...]:
         """Virtual keys of the modifiers that must be held for a chord."""
@@ -141,7 +150,7 @@ class KeyController(QObject):
         self._press_action(key)
 
     def _press_char(self, key: Key) -> None:
-        ch = key.caption(self.shift_active, self.altgr_active)
+        ch = key.caption(self.shifted(key), self.altgr_active)
         if not ch:
             return
         mods = self._chord_modifiers()

@@ -14,7 +14,7 @@ as in the Windows on-screen keyboard.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -39,13 +39,36 @@ class Key:
     def is_char(self) -> bool:
         return not self.action and bool(self.base)
 
+    @property
+    def is_letter(self) -> bool:
+        """True for keys whose character has a distinct upper case."""
+        return bool(self.base) and self.base.upper() != self.base
+
     def caption(self, shift: bool = False, altgr: bool = False) -> str:
-        """The character this key emits at the current modifier level."""
+        """The character this key emits at the current modifier level.
+
+        Letter keys carry no explicit shifted form: there are thirty of them and
+        the shifted character is simply the upper case one, including for ë and
+        ç. Falling back to ``upper()`` rather than listing them is also what
+        keeps Shift working -- an omitted second legend used to mean the key
+        quietly produced its lower-case character with Shift held.
+        """
         if altgr and self.altgr:
             return self.altgr
-        if shift and self.shift:
-            return self.shift
+        if shift:
+            return self.shift or self.base.upper()
         return self.base
+
+    def shifted(self, shift: bool, caps: bool) -> bool:
+        """Whether this key is at its shifted level, given Shift and Caps Lock.
+
+        Caps Lock is not a second Shift: it applies to letters only -- with it
+        on, the comma key must still type a comma -- and it inverts rather than
+        forces, so Shift+A while capitals are locked gives a lower-case a.
+        """
+        if caps and self.is_letter:
+            return not shift
+        return shift
 
 
 def C(base: str, shift: str = "", altgr: str = "", **kw) -> Key:
@@ -99,7 +122,7 @@ ROWS: list[list[Key]] = [
         A("tab", "Tab", w=1.5),
         C("q"), C("w"), C("e"), C("r"), C("t"), C("z"),
         C("u"), C("i"), C("o"), C("p"),
-        C("ç", "Ç"),
+        C("ç"),
         C("@", "'"),
         A("enter", "Enter", w=2.5, h=2),
     ],
@@ -107,7 +130,7 @@ ROWS: list[list[Key]] = [
         A("capslock", "Caps", w=1.5, role="modifier"),
         C("a"), C("s"), C("d"), C("f"), C("g"), C("h"),
         C("j"), C("k"), C("l"),
-        C("ë", "Ë"),
+        C("ë"),
         C("[", "{"),
         C("]", "}"),
         # Enter from the previous row occupies the remaining 2.5 units.

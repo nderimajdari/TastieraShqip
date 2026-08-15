@@ -14,10 +14,10 @@ that still receives the mouse.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QGuiApplication, QLinearGradient, QPainter,
-    QPainterPath, QPen,
+    QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
@@ -32,8 +32,9 @@ from ..prediction.engine import PredictionEngine
 from ..winapi import focus
 from ..winapi.hooks import OutsideClickWatcher
 from . import theme
+from .backlight import Backlight
 from .keypanel import UnitGrid
-from .suggestbar import SuggestionBar
+from .suggestbar import SuggestionBar, band_height
 
 FOCUS_POLL_MS = 350
 MOVE_STEP_PX = 60
@@ -42,11 +43,22 @@ MOVE_STEP_PX = 60
 #: importantly, it is the resize band: no child widget covers it, so it is the
 #: only region where the window itself still sees the mouse.
 MARGIN = 9
-RADIUS = 14
 MIN_WIDTH = 560
 MIN_HEIGHT = 230
 #: How far the pointer must travel before a press counts as a drag.
 DRAG_THRESHOLD = 12
+
+HINT_TEXT = "Tërhiqe për ta lëvizur"
+
+#: The backlight wave, for skins that have one. Ten frames a second, which
+#: sounds far too few until you notice that nothing on the keyboard actually
+#: moves: only the colour changes, by about three degrees of hue a frame, and
+#: colour steps that small cannot be seen. A twelve-second cycle at ten frames
+#: a second therefore looks perfectly smooth and costs a fraction of what
+#: twenty would -- and this is a keyboard that sits on screen all day, so what
+#: it costs while nobody is typing is the number that matters.
+GLOW_FRAME_MS = 100
+GLOW_STEP = 0.0092
 
 
 class DragBar(QWidget):
@@ -99,6 +111,11 @@ class KeyboardWindow(QWidget):
         self._resize_geometry = None
         self._last_foreground = 0
         self._styled = False
+        self.glow = Backlight()
+        self._card: QPixmap | None = None   # the drawn window background
+        # Built before the UI, because applying the settings starts it.
+        self._glow_timer = QTimer(self)
+        self._glow_timer.timeout.connect(self._advance_glow)
 
         self.setObjectName("Root")
         self.setWindowTitle(APP_NAME)
@@ -151,6 +168,14 @@ class KeyboardWindow(QWidget):
         body.addWidget(self.nav_grid, int(albanian.NAV_WIDTH_UNITS))
         root.addLayout(body, 1)
 
+        # The backlight is one layer rather than something each key draws, and
+        # it lives in its own widget so that a frame of the wave repaints only
+        # the gaps between the keys; see backlight.py.
+        self._glow_sources = [self.suggestions.lit_rects,
+                              self.main_grid.lit_rects,
+                              self.nav_grid.lit_rects]
+
+
     def _build_header(self) -> QWidget:
         self.header = DragBar(self)
         header = QHBoxLayout(self.header)
@@ -166,7 +191,7 @@ class KeyboardWindow(QWidget):
         self.title_label.setObjectName("Title")
         header.addWidget(self.title_label)
 
-        self.hint_label = QLabel("Tërhiqe për ta lëvizur")
+        self.hint_label = QLabel(HINT_TEXT)
         self.hint_label.setObjectName("Hint")
         header.addWidget(self.hint_label)
         header.addStretch(1)
@@ -189,6 +214,8 @@ class KeyboardWindow(QWidget):
             ("", "◐", self._toggle_fade, "Zbeh tastierën", "WinBtn"),
             ("", "☀", self._toggle_theme,
              "Ndërro pamjen e errët / të çelët", "WinBtn"),
+            ("", "◈", self._cycle_skin,
+             "Ndërro dizajnin e tastierës", "WinBtn"),
             ("", "⚙", self.open_options, "Opsionet", "WinBtn"),
             ("", "—", self.hide,
              "Fshih (kthehu nga ikona pranë orës)", "WinBtn"),
@@ -212,6 +239,7 @@ class KeyboardWindow(QWidget):
             grid.activated.connect(self._on_key)
             grid.repeated.connect(self._on_key)
         self.suggestions.picked.connect(self._on_suggestion)
+        self.suggestions.zoom_requested.connect(self._zoom_suggestions)
         self.controller.context_changed.connect(self.refresh_suggestions)
         self.controller.modifiers_changed.connect(self._sync_modifiers)
         self.controller.system_action.connect(self._on_system_action)
@@ -224,7 +252,8 @@ class KeyboardWindow(QWidget):
 
     def apply_settings(self) -> None:
         s = self.settings.clamp()
-        theme.set_theme(s.theme, s.accent)
+        theme.set_theme(s.theme, s.accent, s.skin)
+        theme.set_animating(s.rgb_animation)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(theme.stylesheet())
@@ -243,7 +272,7 @@ class KeyboardWindow(QWidget):
 
         self.suggestions.set_shape(s.suggestion_count, s.suggestion_rows)
         self.suggestions.configure_dwell(s.dwell_enabled, s.dwell_ms)
-        self.suggestions.set_font_scale(s.key_font_scale)
+        self.suggestions.set_metrics(s.suggestion_font_scale, s.suggestion_height)
         self.suggestions.setVisible(s.prediction_enabled)
         self.nav_grid.setVisible(s.nav_visible)
 
@@ -251,9 +280,55 @@ class KeyboardWindow(QWidget):
         self.engine.learn = s.learn_from_typing
 
         self.setWindowOpacity(s.faded_opacity if self._faded else s.opacity)
+        self._sync_glow_timer()
         self._apply_geometry()
+        # Key spacing, corner radius and the number of suggestion rows all move
+        # the keys about, and the light is traced from where they ended up.
+        self._refresh_glow_shape()
         self.refresh_suggestions()
         self.update()
+
+    # -- backlighting ------------------------------------------------------
+
+    def _sync_glow_timer(self) -> None:
+        """Run the wave only when there is one, and only when it can be seen.
+
+        A hidden or docked-away keyboard repainting seventy keys twenty times a
+        second would be spending a laptop's battery on a picture nobody is
+        looking at.
+        """
+        wanted = theme.animating() and self.isVisible()
+        if wanted and not self._glow_timer.isActive():
+            self._glow_timer.start(GLOW_FRAME_MS)
+        elif not wanted and self._glow_timer.isActive():
+            self._glow_timer.stop()
+
+    def _advance_glow(self) -> None:
+        theme.advance(GLOW_STEP)
+        # Only the gaps between the keys are damaged, so not one of the
+        # eighty-three keycaps is dragged into the frame.
+        self.update(self.glow.region)
+
+    def _refresh_glow_shape(self) -> None:
+        """The keys have moved, so the light has to be traced over them again."""
+        if not hasattr(self, "_glow_sources"):
+            return
+        grid = self.main_grid
+        unit = (grid.width() / grid.width_units if grid.width() else 60.0,
+                grid.height() / grid.row_count if grid.height() else 55.0)
+        inside = self.rect().adjusted(MARGIN + 1, MARGIN + 1,
+                                      -MARGIN - 1, -MARGIN - 1)
+        self.glow.rebuild(self.size(), self._glow_sources, unit, inside)
+        self._card = None
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_glow_shape()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._sync_glow_timer()
 
     def _restyle(self) -> None:
         p = theme.palette()
@@ -270,9 +345,8 @@ class KeyboardWindow(QWidget):
         """Vertical space the prediction rows want, in pixels."""
         if not self.settings.prediction_enabled:
             return 0
-        rows = self.settings.suggestion_rows
-        scale = min(1.6, max(0.8, self.settings.key_font_scale))
-        return round((20 + rows * 38) * scale)
+        return band_height(self.settings.suggestion_rows,
+                           self.settings.suggestion_height)
 
     def _apply_geometry(self) -> None:
         s = self.settings
@@ -309,23 +383,54 @@ class KeyboardWindow(QWidget):
     # -- painting ----------------------------------------------------------
 
     def paintEvent(self, event) -> None:
-        p = theme.palette()
+        # The card behind everything is redrawn only when it changes. It costs
+        # a dozen antialiased rounded rectangles across the whole window, and
+        # with the backlight running that bill would arrive ten times a second
+        # for a picture that had not changed at all.
         painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._card_pixmap())
+        # The light sits on the board, under the keys: they are their own
+        # widgets and are painted after this.
+        self.glow.paint(painter)
+        painter.end()
+
+    def _card_pixmap(self) -> QPixmap:
+        """The drawn background, built on demand.
+
+        The glow layer declares itself opaque and paints this underneath the
+        light, so it must never be handed a missing background: that is torn
+        pixels on screen rather than a blank one.
+        """
+        if self._card is None or self._card.size() != self._card_size():
+            self._card = self._render_card()
+        return self._card
+
+    def _card_size(self):
+        ratio = self.devicePixelRatioF()
+        return QSize(round(self.width() * ratio), round(self.height() * ratio))
+
+    def _render_card(self) -> QPixmap:
+        p = theme.palette()
+        radius = theme.skin().window_radius
+        card = QPixmap(self._card_size())
+        card.setDevicePixelRatio(self.devicePixelRatioF())
+        card.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(card)
         painter.setRenderHint(QPainter.Antialiasing)
-        card = QRectF(self.rect()).adjusted(MARGIN, MARGIN, -MARGIN, -MARGIN)
+        box = QRectF(self.rect()).adjusted(MARGIN, MARGIN, -MARGIN, -MARGIN)
 
         # A soft shadow, drawn as a few nested outlines. Cheaper than a blur
-        # effect over a window this large, and it repaints on every keypress.
+        # effect over a window this large.
         for i in range(MARGIN, 0, -1):
             glow = QColor(p.shadow)
             glow.setAlpha(int(46 * (1 - i / (MARGIN + 1)) ** 1.7))
             painter.setPen(QPen(glow, 1.0))
-            painter.drawRoundedRect(card.adjusted(-i, -i + 1, i, i + 1),
-                                    RADIUS + i, RADIUS + i)
+            painter.drawRoundedRect(box.adjusted(-i, -i + 1, i, i + 1),
+                                    radius + i, radius + i)
 
         path = QPainterPath()
-        path.addRoundedRect(card, RADIUS, RADIUS)
-        grad = QLinearGradient(card.topLeft(), card.bottomLeft())
+        path.addRoundedRect(box, radius, radius)
+        grad = QLinearGradient(box.topLeft(), box.bottomLeft())
         grad.setColorAt(0.0, QColor(p.window_hi))
         grad.setColorAt(1.0, QColor(p.window_lo))
         painter.fillPath(path, grad)
@@ -337,9 +442,10 @@ class KeyboardWindow(QWidget):
             line = QColor(p.divider)
             line.setAlpha(140)
             painter.setPen(QPen(line, 1.0))
-            painter.drawLine(round(card.left() + 12), y,
-                             round(card.right() - 12), y)
+            painter.drawLine(round(box.left() + 12), y,
+                             round(box.right() - 12), y)
         painter.end()
+        return card
 
     # -- window behaviour --------------------------------------------------
 
@@ -350,6 +456,8 @@ class KeyboardWindow(QWidget):
             # on the keyboard from stealing the caret from the target app.
             focus.make_non_activating(int(self.winId()))
             self._styled = True
+        self._sync_glow_timer()
+        self._refresh_glow_shape()
 
     # -- moving ------------------------------------------------------------
 
@@ -514,9 +622,9 @@ class KeyboardWindow(QWidget):
 
     def _sync_modifiers(self) -> None:
         c = self.controller
-        shift, altgr = c.shift_active, c.altgr_active
-        self.main_grid.set_modifier_state(shift, altgr)
-        self.nav_grid.set_modifier_state(shift, altgr)
+        shift, altgr, caps = c.shift_active, c.altgr_active, c.caps_lock
+        self.main_grid.set_modifier_state(shift, altgr, caps)
+        self.nav_grid.set_modifier_state(shift, altgr, caps)
         for name, mod in (("shift", c.shift), ("ctrl", c.ctrl), ("alt", c.alt),
                           ("win", c.win), ("altgr", c.altgr)):
             for cap in self.main_grid.caps_for_action(name):
@@ -580,6 +688,46 @@ class KeyboardWindow(QWidget):
 
     def _toggle_theme(self) -> None:
         self.settings.theme = "light" if self.settings.theme == "dark" else "dark"
+        self.apply_settings()
+        save_settings(self.settings)
+
+    def _cycle_skin(self) -> None:
+        """Step to the next keyboard design, from the header button.
+
+        The designs are a matter of taste and taste is discovered by looking, so
+        there is a way to page through them without opening a dialog. The name
+        of the one that arrives is announced on the header for a moment, since
+        the button gives no other clue which one you are now on.
+        """
+        keys = list(theme.SKINS)
+        try:
+            index = keys.index(self.settings.skin)
+        except ValueError:
+            index = 0
+        self.settings.skin = keys[(index + 1) % len(keys)]
+        self.apply_settings()
+        save_settings(self.settings)
+        self._flash_hint(theme.SKINS[self.settings.skin].label)
+
+    def _flash_hint(self, text: str) -> None:
+        """Show ``text`` in the header strip, then put the usual hint back."""
+        self.hint_label.setText(text)
+        QTimer.singleShot(1800, lambda: self.hint_label.setText(HINT_TEXT))
+
+    def _zoom_suggestions(self, delta: int) -> None:
+        """Grow or shrink the suggestion buttons, from the +/- on the bar.
+
+        Height and lettering move together: a taller button with the same small
+        word in it helps nobody, and two separate controls for one idea is one
+        control too many out here. Options keeps them apart for anyone who wants
+        that.
+        """
+        s = self.settings
+        before = s.suggestion_height
+        s.suggestion_height = min(96, max(22, before + delta))
+        if s.suggestion_height == before:
+            return
+        s.suggestion_font_scale = round(s.suggestion_height / 34.0, 2)
         self.apply_settings()
         save_settings(self.settings)
 

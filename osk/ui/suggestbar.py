@@ -11,19 +11,47 @@ The chips are deliberately large and evenly sized: for someone with limited
 pointer control, a suggestion that is hard to hit is a suggestion that costs more
 than typing the word out. They carry the same dwell behaviour as the keys, so a
 dwell user can accept a prediction without clicking.
+
+Their size is set separately from the keys', and adjustable from the bar itself
+rather than only from a dialog. The suggestions are read, not aimed at from
+memory, so the size that suits them is rarely the size that suits the keys --
+and it is the setting people want to change mid-sentence, when a word will not
+quite fit or the row has become hard to read.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import (
+    QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
+    QWidget,
+)
 
 from . import theme
 from .theme import mix as _mix
 
 DWELL_TICK_MS = 25
-RADIUS = 9.0
+
+#: Chip height in pixels, and the range the zoom buttons move it through.
+DEFAULT_HEIGHT = 34
+MIN_HEIGHT = 22
+MAX_HEIGHT = 96
+ZOOM_STEP = 6
+
+GRID_SPACING = 5
+CONTEXT_HEIGHT = 18
+
+
+def band_height(rows: int, chip_height: int) -> int:
+    """Vertical space the whole prediction area needs, in pixels.
+
+    The window asks for this before the bar has been laid out -- it is part of
+    deciding how tall the window has to be -- so it is arithmetic here rather
+    than a size hint taken from live widgets.
+    """
+    return (rows * chip_height + (rows - 1) * GRID_SPACING
+            + CONTEXT_HEIGHT + 6)
 
 
 class SuggestionChip(QWidget):
@@ -36,7 +64,7 @@ class SuggestionChip(QWidget):
         self.setFocusPolicy(Qt.NoFocus)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setMinimumHeight(30)
+        self.setMinimumHeight(DEFAULT_HEIGHT)
 
         self._word = ""
         self._primary = primary   # the model's best guess, marked out
@@ -127,11 +155,12 @@ class SuggestionChip(QWidget):
 
     def paintEvent(self, event) -> None:
         p = theme.palette()
+        radius = min(theme.skin().radius + 1.0, self.height() / 2.0)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         path = QPainterPath()
-        path.addRoundedRect(rect, RADIUS, RADIUS)
+        path.addRoundedRect(rect, radius, radius)
 
         if not self._word:
             # An empty slot stays as a faint outline rather than vanishing, so
@@ -178,11 +207,16 @@ class SuggestionChip(QWidget):
         painter.setPen(QPen(border, 1.6 if self._primary and not self._hover else 1.0))
         painter.drawPath(path)
 
-        font = QFont(self.font())
-        font.setPointSizeF(max(8.5, min(rect.height() * 0.42, 15.0) * self._font_scale))
-        font.setWeight(QFont.DemiBold if self._primary else QFont.Normal)
+        # The chip grows with its own zoom setting, and the lettering with it --
+        # but capped against the chip, so a word can never spill out of the
+        # button it belongs to.
+        size = max(8.0, min(rect.height() * 0.46, 13.0 * self._font_scale))
+        font = theme.key_font(self.font(), size, 600 if self._primary else 450)
         painter.setFont(font)
-        painter.setPen(QColor(p.on_accent if self._pressed else p.text))
+        # p.legend, not p.text: on a design whose caps are a different colour
+        # from the window -- cream keys on a black body -- the chips are caps
+        # too, and the window's text colour would be invisible on them.
+        painter.setPen(QColor(p.on_accent if self._pressed else p.legend))
         painter.drawText(rect.adjusted(6, 0, -6, 0),
                          Qt.AlignCenter | Qt.TextSingleLine, self._word)
         painter.end()
@@ -192,6 +226,10 @@ class SuggestionBar(QWidget):
     """Shows predictions in a grid and reports which one the user picked."""
 
     picked = Signal(str)
+    #: A request to change the chip size by ``delta`` pixels, from the two
+    #: buttons on the bar. The window owns the setting and saves it, so the bar
+    #: asks rather than decides.
+    zoom_requested = Signal(int)
 
     def __init__(self, per_row: int = 7, rows: int = 2,
                  parent: QWidget | None = None) -> None:
@@ -203,11 +241,33 @@ class SuggestionBar(QWidget):
         outer.setContentsMargins(2, 0, 2, 0)
         outer.setSpacing(3)
 
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(4)
+
         self.context_label = QLabel("")
         self.context_label.setObjectName("ContextLabel")
         self.context_label.setTextFormat(Qt.PlainText)
-        self.context_label.setFixedHeight(15)
-        outer.addWidget(self.context_label)
+        self.context_label.setFixedHeight(CONTEXT_HEIGHT)
+        top.addWidget(self.context_label, 1)
+
+        # Zoom lives on the bar, not only in Options: this is the control people
+        # reach for while writing, and a dialog three clicks away is a control
+        # they will not use.
+        self._zoom_buttons = []
+        for text, delta, tip in (("−", -ZOOM_STEP, "Zvogëlo fjalët e sugjeruara"),
+                                 ("+", ZOOM_STEP, "Zmadho fjalët e sugjeruara")):
+            btn = QPushButton(text, self)
+            btn.setObjectName("ZoomBtn")
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setFixedSize(22, CONTEXT_HEIGHT)
+            btn.setToolTip(tip)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _checked=False, d=delta:
+                                self.zoom_requested.emit(d))
+            top.addWidget(btn, 0)
+            self._zoom_buttons.append(btn)
+        outer.addLayout(top)
 
         # Only ever shown when something is wrong -- a missing or unreadable
         # language model, which would otherwise look like the prediction simply
@@ -219,7 +279,7 @@ class SuggestionBar(QWidget):
         outer.addWidget(self.status_label)
 
         self._grid = QGridLayout()
-        self._grid.setSpacing(5)
+        self._grid.setSpacing(GRID_SPACING)
         outer.addLayout(self._grid, 1)
 
         self._chips: list[SuggestionChip] = []
@@ -227,6 +287,7 @@ class SuggestionBar(QWidget):
         self._rows = rows
         self._dwell = (False, 900)
         self._font_scale = 1.0
+        self._chip_height = DEFAULT_HEIGHT
         self.set_shape(per_row, rows)
 
     # -- shape -------------------------------------------------------------
@@ -245,6 +306,7 @@ class SuggestionBar(QWidget):
             chip.picked.connect(self.picked)
             chip.configure_dwell(*self._dwell)
             chip.set_font_scale(self._font_scale)
+            chip.setMinimumHeight(self._chip_height)
             self._grid.addWidget(chip, index // per_row, index % per_row)
             self._chips.append(chip)
         for column in range(per_row):
@@ -262,14 +324,21 @@ class SuggestionBar(QWidget):
         for chip in self._chips:
             chip.configure_dwell(enabled, ms)
 
-    def set_font_scale(self, scale: float) -> None:
+    def set_metrics(self, scale: float, height: int) -> None:
+        """Set the lettering scale and the height of the suggestion buttons."""
         self._font_scale = scale
+        self._chip_height = min(MAX_HEIGHT, max(MIN_HEIGHT, height))
         for chip in self._chips:
             chip.set_font_scale(scale)
+            chip.setMinimumHeight(self._chip_height)
         font = self.context_label.font()
-        font.setPointSizeF(max(7.0, 8.5 * scale))
+        font.setPointSizeF(max(7.0, 8.5 * min(1.6, scale)))
         self.context_label.setFont(font)
-        self.context_label.setFixedHeight(round(15 * min(1.6, scale)))
+        self.updateGeometry()
+
+    @property
+    def chip_height(self) -> int:
+        return self._chip_height
 
     def restyle(self) -> None:
         p = theme.palette()
@@ -293,3 +362,19 @@ class SuggestionBar(QWidget):
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
         self.status_label.setVisible(bool(text))
+
+    # -- backlighting ------------------------------------------------------
+
+    def lit_rects(self):
+        """The chips' rectangles, for the glow overlay; see UnitGrid.lit_rects.
+
+        The suggestions sit above the number row, so including them is what
+        keeps the light looking like one board rather than something that
+        starts halfway down.
+        """
+        if not self.isVisibleTo(self.window()):
+            return []
+        offset = self.mapTo(self.window(), self.rect().topLeft())
+        radius = theme.skin().radius + 1.0
+        return [(chip.geometry().translated(offset), radius)
+                for chip in self._chips]

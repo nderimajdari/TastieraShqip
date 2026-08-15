@@ -30,6 +30,14 @@ class Settings:
     #: are load-bearing signals, and a user with colour vision deficiency may not
     #: distinguish the default from the key beneath it.
     accent: str = "blue"
+    #: Which keyboard design to draw: see osk/ui/theme.py. An unknown name falls
+    #: back to the plain one rather than refusing to start.
+    skin: str = "standard"
+    #: Whether the backlight of the RGB design drifts. Turning it off leaves a
+    #: static rainbow across the board and stops the repainting entirely --
+    #: worth having for a slow machine, and for anyone who finds movement at
+    #: the edge of their vision distracting while they write.
+    rgb_animation: bool = True
 
     # -- typing -----------------------------------------------------------
     key_font_scale: float = 1.0
@@ -53,6 +61,12 @@ class Settings:
     #: space and a longer visual search for a smaller return.
     suggestion_count: int = 7
     suggestion_rows: int = 2
+    #: The suggestion buttons are sized separately from the keys. They are read
+    #: rather than aimed at from memory, so the size that suits them is rarely
+    #: the size that suits the keys -- and someone who has enlarged the keys to
+    #: hit them may want the words smaller to see more of them at once.
+    suggestion_font_scale: float = 1.0
+    suggestion_height: int = 34
     auto_space: bool = True
     learn_from_typing: bool = True
 
@@ -61,6 +75,8 @@ class Settings:
         self.faded_opacity = min(1.0, max(0.15, self.faded_opacity))
         self.suggestion_count = min(10, max(3, self.suggestion_count))
         self.suggestion_rows = min(3, max(1, self.suggestion_rows))
+        self.suggestion_font_scale = min(2.5, max(0.6, self.suggestion_font_scale))
+        self.suggestion_height = min(96, max(22, self.suggestion_height))
         if self.theme not in ("dark", "light"):
             self.theme = "dark"
         self.dwell_ms = min(4000, max(300, self.dwell_ms))

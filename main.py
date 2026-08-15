@@ -89,7 +89,7 @@ def main() -> int:
     settings = load_settings()
     # The window applies the theme itself once it is built; setting it here too
     # means the tray icon and any early dialog are already the right colour.
-    theme.set_theme(settings.theme, settings.accent)
+    theme.set_theme(settings.theme, settings.accent, settings.skin)
     app.setStyleSheet(theme.stylesheet())
     engine = PredictionEngine()          # the model arrives on the thread below
     engine.auto_space = settings.auto_space
