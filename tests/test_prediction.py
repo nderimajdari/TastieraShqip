@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from osk.prediction.engine import PredictionEngine, RecencyCache
 from osk.prediction.model import LanguageModel, fold
+from osk.prediction.sentences import SentenceBank, learnable, normalise
 from osk.prediction.tokens import (
     SENTENCE_START, at_sentence_start, context_words, current_sentence,
     match_case, tokenize, trailing_prefix,
@@ -58,6 +59,17 @@ def make_model() -> LanguageModel:
 
 def temp_user() -> UserModel:
     return UserModel(Path(tempfile.mkdtemp()) / "user.json")
+
+
+def temp_bank(builtin: bool = False) -> SentenceBank:
+    """A sentence store in a scratch directory.
+
+    Never the default path: the default is the real one under %APPDATA%, and a
+    test run must not write the user's own sentences file -- nor read it, since
+    the ranking assertions would then depend on what they had been writing.
+    """
+    return SentenceBank(Path(tempfile.mkdtemp()) / "sentences.json",
+                        builtin=builtin)
 
 
 # -- tokenisation ---------------------------------------------------------
@@ -240,7 +252,7 @@ def test_recency_cache_decays():
 # -- the engine -----------------------------------------------------------
 
 def make_engine() -> PredictionEngine:
-    e = PredictionEngine(None, temp_user())
+    e = PredictionEngine(None, temp_user(), temp_bank())
     e.model = make_model()
     return e
 
@@ -414,6 +426,278 @@ def test_learning_can_be_switched_off():
     e.learn = False
     e.on_text("fjalëpapare ")
     assert e.user.unigram == {}
+
+
+# -- multi-word suggestions -----------------------------------------------
+
+def test_a_confident_continuation_is_bundled_into_one_suggestion():
+    """"mirë" is followed by "dhe" 400 times in 500: one press, not two."""
+    e = make_engine()
+    e.on_text("shumë ")
+    assert "mirë dhe" in e.suggestions(8)
+
+
+def test_a_bundled_phrase_sits_next_to_the_word_it_extends():
+    """The far end of the last row is the most expensive button on the board."""
+    e = make_engine()
+    e.on_text("shumë ")
+    words = e.suggestions(8)
+    assert words.index("mirë dhe") == words.index("mirë") + 1
+
+
+def test_an_unsure_continuation_is_not_bundled():
+    """"si" is followed by "je" only 50 times in 90 -- not enough to commit to."""
+    e = make_engine()
+    e.on_text("faleminderit ")
+    assert not any(w.startswith("si ") for w in e.suggestions(8))
+
+
+def test_phrases_can_be_switched_off():
+    e = make_engine()
+    e.phrases = False
+    e.on_text("shumë ")
+    assert all(" " not in w for w in e.suggestions(8))
+
+
+def test_a_phrase_completes_a_half_typed_word():
+    e = make_engine()
+    e.on_text("shumë mir")
+    assert "mirë dhe" in e.suggestions(8)
+
+
+def test_accepting_a_phrase_types_only_what_is_missing():
+    e = make_engine()
+    e.on_text("shumë mir")
+    plan = e.plan_accept("mirë dhe")
+    assert plan.backspaces == 0
+    assert plan.text == "ë dhe "
+
+
+def test_a_phrase_never_crowds_out_more_than_its_share():
+    e = make_engine()
+    e.on_text("shumë ")
+    words = e.suggestions(14)
+    assert len(words) == 14
+    assert sum(" " in w for w in words) <= 3
+
+
+# -- punctuation and capitals ---------------------------------------------
+
+def test_a_space_this_keyboard_added_is_taken_back_out_for_a_full_stop():
+    """Otherwise auto-space writes "fjala ." and every sentence costs a
+    trip to Backspace to repair."""
+    e = make_engine()
+    e.on_text("shumë ")
+    plan = e.plan_accept("mirë")
+    e.on_text(plan.text, auto_space=plan.auto_space)
+    assert e.pending_auto_space()
+    assert e.plan_punctuation(".")
+    assert e.plan_punctuation(",")
+
+
+def test_a_space_the_user_typed_is_left_alone():
+    """Removing it would be the keyboard editing text it was not asked to."""
+    e = make_engine()
+    e.on_text("mirë")
+    e.on_text(" ")
+    assert not e.pending_auto_space()
+    assert not e.plan_punctuation(".")
+
+
+def test_an_ordinary_letter_never_eats_the_space():
+    e = make_engine()
+    e.on_text("shumë ")
+    plan = e.plan_accept("mirë")
+    e.on_text(plan.text, auto_space=plan.auto_space)
+    assert not e.plan_punctuation("a")
+
+
+def test_the_pending_space_does_not_survive_more_typing():
+    e = make_engine()
+    e.on_text("shumë ")
+    plan = e.plan_accept("mirë")
+    e.on_text(plan.text, auto_space=plan.auto_space)
+    e.on_text("d")
+    assert not e.pending_auto_space()
+
+
+def test_sentence_start_is_reported_only_between_words():
+    e = make_engine()
+    e.on_text("Kjo mbaroi. ")
+    assert e.at_sentence_start
+    e.on_text("s")
+    # Halfway through a word the question does not arise: capitalising here
+    # would turn "Si" into "SI".
+    assert not e.at_sentence_start
+
+
+def test_sentence_start_is_false_mid_sentence():
+    e = make_engine()
+    e.on_text("shumë ")
+    assert not e.at_sentence_start
+
+
+# -- whole sentences ------------------------------------------------------
+
+def test_normalise_rejects_what_is_not_worth_a_row():
+    assert normalise("  Po   mirë,  faleminderit. ") == "Po mirë, faleminderit."
+    assert normalise("Po.") == ""            # one word, and already one press
+    assert normalise("") == ""
+    assert normalise("12 34 56") == ""       # no letters at all
+    assert normalise("x" * 400) == ""        # a paragraph, not a sentence
+
+
+def test_sentences_with_long_digit_runs_are_never_stored():
+    # A card number, a code or a telephone number must not be learned and then
+    # offered back on a keyboard somebody else can see.
+    bank = temp_bank()
+    assert not learnable("Kodi im është 481920371.")
+    assert not bank.observe("Kodi im është 481920371.")
+    assert len(bank) == 0
+    # An ordinary year or house number is not a secret and is still learned.
+    assert bank.observe("Kam lindur në vitin 1994.")
+    assert len(bank) == 1
+
+
+def test_bank_offers_what_was_written_before():
+    bank = temp_bank()
+    bank.observe("Do të përgjigjem nesër.")
+    assert bank.matches("") == ["Do të përgjigjem nesër."]
+
+
+def test_bank_matches_on_the_opening_of_a_sentence():
+    bank = temp_bank()
+    bank.observe("Faleminderit shumë për ndihmën.")
+    bank.observe("Mirupafshim dhe gjithë të mirat.")
+    assert bank.matches("Fal") == ["Faleminderit shumë për ndihmën."]
+
+
+def test_bank_matching_ignores_case_and_missing_diacritics():
+    # The whole point for this user: reaching Ë costs a trip, so typing the
+    # plain letters must still find the sentence.
+    bank = temp_bank()
+    bank.observe("Përshëndetje, si jeni sot?")
+    assert bank.matches("pers") == ["Përshëndetje, si jeni sot?"]
+    assert bank.matches("PËRSH") == ["Përshëndetje, si jeni sot?"]
+
+
+def test_bank_does_not_offer_a_sentence_already_fully_typed():
+    bank = temp_bank()
+    bank.observe("Po vij menjëherë.")
+    assert bank.matches("Po vij menjëherë.") == []
+
+
+def test_bank_ranks_the_used_and_the_recent_first():
+    bank = temp_bank()
+    bank.observe("Fjalia e vjetër është këtu.")
+    for _ in range(3):
+        bank.observe("Fjalia e përdorur shpesh.")
+    for _ in range(80):                 # push the first one out of recency
+        bank.observe("Diçka tjetër krejt.")
+    bank.observe("Fjalia e shkruar tani.")
+    top = bank.matches("Fjalia", k=3)
+    # Just written beats used-three-times-a-while-ago, which beats used once a
+    # long time ago. The first of those is the deliberate choice: people repeat
+    # what they said a minute ago far more than what they said last month.
+    assert top == ["Fjalia e shkruar tani.",
+                   "Fjalia e përdorur shpesh.",
+                   "Fjalia e vjetër është këtu."]
+
+
+def test_bank_offers_the_bundled_sentences_before_anything_is_learned():
+    bank = temp_bank(builtin=True)
+    assert len(bank) == 0
+    assert "Faleminderit shumë!" in bank.matches("Fal", k=8)
+
+
+def test_the_users_own_sentence_outranks_a_bundled_one():
+    bank = temp_bank(builtin=True)
+    bank.observe("Faleminderit për gjithçka që bëtë.")
+    assert bank.matches("Fal", k=8)[0] == "Faleminderit për gjithçka që bëtë."
+
+
+def test_bank_survives_a_save_and_reload():
+    bank = temp_bank()
+    bank.observe("Kjo duhet të mbijetojë.")
+    bank.save()
+    again = SentenceBank(bank.path, builtin=False)
+    assert again.matches("") == ["Kjo duhet të mbijetojë."]
+
+
+def test_bank_clear_removes_the_file_and_the_sentences():
+    bank = temp_bank()
+    bank.observe("Kjo duhet të fshihet.")
+    bank.save()
+    bank.clear()
+    assert len(bank) == 0
+    assert not bank.path.exists()
+    assert SentenceBank(bank.path, builtin=False).matches("") == []
+
+
+def test_engine_learns_a_sentence_when_the_full_stop_arrives():
+    e = make_engine()
+    e.on_text("Sot jam shumë mirë")
+    assert e.bank.matches("") == []      # not finished yet
+    e.on_text(".")
+    assert e.bank.matches("") == ["Sot jam shumë mirë."]
+
+
+def test_engine_learns_a_line_ended_by_enter():
+    # An address line or a sign-off ends in no punctuation at all, and is
+    # exactly the repeated material worth recalling whole.
+    e = make_engine()
+    e.on_text("Rruga e Dibrës 45, Tiranë\n")
+    assert e.bank.matches("") == ["Rruga e Dibrës 45, Tiranë"]
+
+
+def test_engine_does_not_learn_sentences_when_told_not_to():
+    e = make_engine()
+    e.learn_sentences = False
+    e.on_text("Kjo nuk duhet të ruhet.")
+    assert len(e.bank) == 0
+
+
+def test_engine_reports_the_sentence_being_written():
+    e = make_engine()
+    e.on_text("Mbaroi kjo. Tani po shkruaj")
+    assert e.sentence == "Tani po shkruaj"
+
+
+def test_engine_offers_sentences_that_continue_the_current_one():
+    e = make_engine()
+    e.on_text("Do të vij nesër në zyrë.")
+    e.on_text(" Do t")
+    assert e.sentence_suggestions() == ["Do të vij nesër në zyrë."]
+
+
+def test_accepting_a_sentence_replaces_only_what_was_typed():
+    e = make_engine()
+    e.on_text("Faleminderit shumë për ndihmën.")
+    e.on_text(" Falem")
+    plan = e.plan_sentence("Faleminderit shumë për ndihmën.")
+    # An exact prefix is kept rather than deleted and retyped: the backspaces
+    # would be real keystrokes travelling to the other application.
+    assert plan.backspaces == 0
+    assert plan.text == "inderit shumë për ndihmën. "
+    assert plan.auto_space
+
+
+def test_accepting_a_sentence_typed_without_diacritics_retypes_it():
+    e = make_engine()
+    e.on_text("Përshëndetje nga unë.")
+    e.on_text(" Persh")
+    plan = e.plan_sentence("Përshëndetje nga unë.")
+    # "Persh" is not a prefix of "Përsh", so the accented form has to replace
+    # it -- six characters back, then the sentence.
+    assert plan.backspaces == 5
+    assert plan.text == "Përshëndetje nga unë. "
+
+
+def test_a_sentence_accepted_from_nothing_is_typed_whole():
+    e = make_engine()
+    plan = e.plan_sentence("Mirëmëngjes!")
+    assert plan.backspaces == 0
+    assert plan.text == "Mirëmëngjes! "
 
 
 def main() -> int:

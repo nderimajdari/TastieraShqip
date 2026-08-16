@@ -16,9 +16,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from osk.config import Settings
-from osk.controller import Modifier
+from osk.controller import KeyController, Modifier
 from osk.layouts import albanian
 from osk.layouts.albanian import Key
+from osk.prediction.engine import PredictionEngine
+from osk.prediction.sentences import SentenceBank
+from osk.prediction.userstore import UserModel
 from osk.ui import theme
 
 
@@ -32,6 +35,67 @@ def key_for(base: str) -> Key:
         if key.is_char and key.base == base:
             return key
     raise AssertionError(f"no key types {base!r}")
+
+
+def action_key(action: str) -> Key:
+    for key in all_keys():
+        if key.action == action:
+            return key
+    raise AssertionError(f"no key does {action!r}")
+
+
+class FakeInput:
+    """Stands in for SendInput, and records what would have been typed.
+
+    The controller is where auto-capitals and the punctuation repair live, and
+    both are decided just before the characters leave for the operating system
+    -- so this is the only level at which they can be checked at all.
+    """
+
+    def __init__(self) -> None:
+        self.typed = ""
+
+    def send_text(self, text: str) -> None:
+        self.typed += text
+
+    def send_named(self, name: str, mods=()) -> None:
+        if name == "backspace" and not mods:
+            self.typed = self.typed[:-1]
+        elif name == "space" and not mods:
+            self.typed += " "
+
+    def send_char_as_chord(self, ch, mods, hkl) -> bool:  # pragma: no cover
+        return True
+
+
+def typing_controller(monkey: list) -> tuple[KeyController, FakeInput]:
+    """A controller wired to a recorder instead of to the real keyboard."""
+    import tempfile
+
+    from osk import controller as controller_module
+
+    fake = FakeInput()
+    original = controller_module.sendinput
+    controller_module.sendinput = fake
+    monkey.append(lambda: setattr(controller_module, "sendinput", original))
+
+    scratch = Path(tempfile.mkdtemp())
+    store = UserModel(scratch / "user.json")
+    # A scratch sentence store, never the default: the default is the real one
+    # under %APPDATA%, and a test must not write the user's own sentences.
+    bank = SentenceBank(scratch / "sentences.json", builtin=False)
+    engine = PredictionEngine(user_model=store, sentence_bank=bank)
+    engine.learn = False
+    return KeyController(engine), fake
+
+
+def type_keys(controller: KeyController, sequence: str) -> None:
+    """Press the keys that produce ``sequence``, one character at a time."""
+    for ch in sequence:
+        if ch == " ":
+            controller.press(action_key("space"))
+        else:
+            controller.press(key_for(ch))
 
 
 # -- shift ------------------------------------------------------------------
@@ -294,6 +358,197 @@ def test_suggestion_size_settings_are_clamped_to_something_usable() -> None:
     s = Settings(suggestion_height=1, suggestion_font_scale=0.0).clamp()
     assert s.suggestion_height == 22
     assert s.suggestion_font_scale == 0.6
+
+
+# -- what a sentence costs to write -----------------------------------------
+#
+# Every press these remove is a trip across the whole keyboard for somebody
+# aiming with one finger, and a sentence boundary used to cost four of them.
+
+def test_a_full_stop_closes_up_the_space_auto_space_left() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        c.engine.on_text("Shkova ")
+        plan = c.engine.plan_accept("shtëpi")
+        fake.typed = "Shkova shtëpi "
+        c.engine.on_text(plan.text, auto_space=plan.auto_space)
+        c.press(key_for("."))
+        assert fake.typed == "Shkova shtëpi. "
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_a_full_stop_the_user_spaced_themselves_is_left_alone() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        type_keys(c, "po ")
+        c.press(key_for("."))
+        # The space was theirs, so it stays, and nothing is added after a stop
+        # that does not follow a letter. The keyboard tidies up after itself,
+        # not after the user.
+        assert fake.typed == "Po ."
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_a_number_keeps_its_decimal_point() -> None:
+    """"3.14" must not become "3. 14" -- the character before the stop is
+    what tells a decimal from the end of a sentence."""
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        type_keys(c, "3")
+        c.press(key_for("."))
+        type_keys(c, "14")
+        assert fake.typed == "3.14"
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_the_first_letter_after_a_full_stop_is_capitalised() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        type_keys(c, "po")
+        c.press(key_for("."))
+        type_keys(c, "po")
+        # The first letter of all is capitalised too: an empty buffer is the
+        # start of a sentence as much as a full stop is.
+        assert fake.typed == "Po. Po"
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_auto_capitals_can_be_switched_off() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        c.auto_capitals = False
+        type_keys(c, "po")
+        c.press(key_for("."))
+        type_keys(c, "po")
+        assert fake.typed == "po. po"
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_the_automatic_capital_never_overrides_shift_or_caps_lock() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        c.caps_lock = True
+        c.press(action_key("shift"))     # Shift inverts Caps Lock: small letter
+        c.press(key_for("p"))
+        assert fake.typed == "p"
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_auto_capitals_do_not_reach_the_middle_of_a_word() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        type_keys(c, "a")
+        c.press(key_for("."))
+        type_keys(c, "bc")
+        assert fake.typed == "A. Bc"
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_shift_still_wins_over_an_automatic_capital() -> None:
+    """Shift at a sentence start must still be able to produce lower case
+    once Caps Lock is on -- the automatic capital may not override the user."""
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        type_keys(c, "po")
+        c.press(key_for("."))
+        c.caps_lock = True
+        c.press(action_key("shift"))
+        c.press(key_for("p"))
+        assert fake.typed.endswith("p")
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_punctuation_repair_can_be_switched_off() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        c.auto_punctuation = False
+        type_keys(c, "po")
+        c.press(key_for("."))
+        assert fake.typed == "Po."
+    finally:
+        for fn in undo:
+            fn()
+
+
+# -- whole sentences --------------------------------------------------------
+
+def test_a_recalled_sentence_is_typed_in_full() -> None:
+    """One press must produce the whole sentence, spaced ready for the next."""
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        c.accept_sentence("Faleminderit shumë për ndihmën.")
+        assert fake.typed == "Faleminderit shumë për ndihmën. "
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_a_recalled_sentence_replaces_the_letters_already_typed() -> None:
+    # The guard here is against the sentence being appended to the fragment
+    # that summoned it -- "FalFaleminderit..." is the obvious failure.
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        c.engine.bank.observe("Faleminderit shumë për ndihmën.")
+        type_keys(c, "fal")
+        c.accept_sentence("Faleminderit shumë për ndihmën.")
+        assert fake.typed == "Faleminderit shumë për ndihmën. "
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_a_recalled_sentence_leaves_the_sentence_before_it_alone() -> None:
+    undo = []
+    try:
+        c, fake = typing_controller(undo)
+        type_keys(c, "po")
+        c.press(key_for("."))
+        c.accept_sentence("Mirupafshim!")
+        assert fake.typed == "Po. Mirupafshim! "
+    finally:
+        for fn in undo:
+            fn()
+
+
+def test_a_sentence_typed_by_hand_is_remembered() -> None:
+    """The whole feature rests on this: what is written comes back."""
+    undo = []
+    try:
+        c, _fake = typing_controller(undo)
+        c.engine.learn_sentences = True
+        type_keys(c, "po vij nesër")
+        c.press(key_for("."))
+        assert c.engine.bank.matches("") == ["Po vij nesër."]
+    finally:
+        for fn in undo:
+            fn()
 
 
 def main() -> int:

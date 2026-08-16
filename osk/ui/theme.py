@@ -597,6 +597,25 @@ QPushButton#ZoomBtn {{
 }}
 QPushButton#CloseBtn:hover {{ background: #d13438; color: #ffffff; }}
 
+/* The way into the whole-sentence panel. It changes appearance when there is
+   something behind it rather than only carrying a number, because the number is
+   small and this is the one control on the bar worth noticing across the room. */
+QPushButton#SentencesBtn {{
+    background: transparent;
+    border: 1px solid {p.chip_border};
+    border-radius: 7px;
+    color: {p.text_dim};
+    padding: 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#SentencesBtn[ready="true"] {{
+    border-color: {p.accent};
+    color: {p.accent};
+}}
+QPushButton#SentencesBtn:hover {{ background: {p.chip_hi}; color: {p.text}; }}
+QPushButton#SentencesBtn:pressed {{ background: {p.accent}; color: {p.on_accent}; }}
+
 QToolTip {{
     background: {p.surface};
     color: {p.text};
@@ -665,6 +684,13 @@ QSlider::handle:horizontal {{
     margin: -7px 0; border-radius: 9px;
     border: 2px solid {dialog_bg};
 }}
+/* A control that has been switched off has to look switched off. The dwell
+   time and the repeat rate are disabled while their own checkbox is clear, and
+   a live-looking slider that does nothing when dragged is worse than no slider
+   at all -- particularly for a user who cannot easily drag it twice. */
+QSlider::sub-page:horizontal:disabled {{ background: {p.divider}; }}
+QSlider::handle:horizontal:disabled {{ background: {p.text_faint}; }}
+QDialog QLabel:disabled, QDialog QCheckBox:disabled {{ color: {p.text_faint}; }}
 
 QSpinBox, QComboBox {{
     background: {field_bg}; color: {p.text};

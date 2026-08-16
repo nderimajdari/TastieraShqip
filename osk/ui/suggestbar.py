@@ -230,6 +230,8 @@ class SuggestionBar(QWidget):
     #: buttons on the bar. The window owns the setting and saves it, so the bar
     #: asks rather than decides.
     zoom_requested = Signal(int)
+    #: A request to open the whole-sentence panel.
+    sentences_requested = Signal()
 
     def __init__(self, per_row: int = 7, rows: int = 2,
                  parent: QWidget | None = None) -> None:
@@ -250,6 +252,20 @@ class SuggestionBar(QWidget):
         self.context_label.setTextFormat(Qt.PlainText)
         self.context_label.setFixedHeight(CONTEXT_HEIGHT)
         top.addWidget(self.context_label, 1)
+
+        # The way into the whole-sentence panel sits here rather than on the
+        # header, because this is where the eye already is: the user has just
+        # read the suggestion row and found nothing that saves them the trip.
+        # It counts what is waiting, so the panel is never opened blind.
+        self.sentences_button = QPushButton("Fjali", self)
+        self.sentences_button.setObjectName("SentencesBtn")
+        self.sentences_button.setFocusPolicy(Qt.NoFocus)
+        self.sentences_button.setFixedHeight(CONTEXT_HEIGHT)
+        self.sentences_button.setMinimumWidth(74)
+        self.sentences_button.setCursor(Qt.PointingHandCursor)
+        self.sentences_button.setToolTip("Fjali të plota — shkruani një fjali me një klikim")
+        self.sentences_button.clicked.connect(self.sentences_requested)
+        top.addWidget(self.sentences_button, 0)
 
         # Zoom lives on the bar, not only in Options: this is the control people
         # reach for while writing, and a dialog three clicks away is a control
@@ -362,6 +378,18 @@ class SuggestionBar(QWidget):
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
         self.status_label.setVisible(bool(text))
+
+    def set_sentence_count(self, count: int) -> None:
+        """Say how many whole sentences are waiting behind the button.
+
+        Without the number the panel is a gamble -- two presses to look and
+        find nothing -- and a gamble is a thing a slow typist stops taking.
+        """
+        self.sentences_button.setText(f"Fjali  {count}" if count else "Fjali")
+        self.sentences_button.setProperty("ready", bool(count))
+        # A property used by the stylesheet only takes effect on a re-polish.
+        self.sentences_button.style().unpolish(self.sentences_button)
+        self.sentences_button.style().polish(self.sentences_button)
 
     # -- backlighting ------------------------------------------------------
 

@@ -68,7 +68,28 @@ class Settings:
     suggestion_font_scale: float = 1.0
     suggestion_height: int = 34
     auto_space: bool = True
+    #: Bundle a confident following word into the same suggestion, so "do të"
+    #: costs one press instead of two. Albanian is full of these chunks and a
+    #: trip across the keyboard is the whole price of a word for a pointer user.
+    phrase_suggestions: bool = True
+    #: Capitalise the first letter after a full stop. Reaching Shift is two
+    #: trips for one capital, and every sentence needs one.
+    auto_capitals: bool = True
+    #: Keep punctuation tight against the word before it and put the space
+    #: after it in automatically. Without this, auto-space leaves "fjala ."
+    #: and every sentence costs a trip to Backspace to repair.
+    auto_punctuation: bool = True
     learn_from_typing: bool = True
+
+    # -- whole sentences --------------------------------------------------
+    #: Offer complete sentences, recalled from the ones this user has written
+    #: before. Word prediction still charges a press per word; a sentence
+    #: recalled whole costs one press however long it is, which is the only
+    #: thing on this keyboard that changes the order of the cost.
+    sentence_suggestions: bool = True
+    #: Rows in the sentence panel. Six fits the key area at the default size
+    #: without the rows becoming too short to hit.
+    sentence_count: int = 6
 
     def clamp(self) -> "Settings":
         self.opacity = min(1.0, max(0.25, self.opacity))
@@ -83,6 +104,7 @@ class Settings:
         self.key_font_scale = min(2.0, max(0.6, self.key_font_scale))
         self.repeat_delay_ms = min(2000, max(150, self.repeat_delay_ms))
         self.repeat_rate_ms = min(500, max(20, self.repeat_rate_ms))
+        self.sentence_count = min(8, max(3, self.sentence_count))
         return self
 
 

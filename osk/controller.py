@@ -17,7 +17,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, Signal
 
 from .layouts.albanian import Key
-from .prediction.engine import PredictionEngine
+from .prediction.engine import AcceptPlan, PredictionEngine
 from .winapi import focus, sendinput
 from .winapi.sendinput import VK
 
@@ -78,6 +78,12 @@ class KeyController(QObject):
         self.win = Modifier(VK["lwin"])
         self.altgr = Modifier(VK["ralt"])
         self.caps_lock = False
+        #: Capitalise the first letter typed after a full stop. Shift is two
+        #: trips across the board for one capital, and a sentence needs one
+        #: every time -- see :meth:`_press_char`.
+        self.auto_capitals = True
+        #: Put the space after a full stop or comma in without being asked.
+        self.auto_punctuation = True
         self._modifiers = {
             "shift": self.shift, "ctrl": self.ctrl,
             "alt": self.alt, "win": self.win, "altgr": self.altgr,
@@ -150,7 +156,8 @@ class KeyController(QObject):
         self._press_action(key)
 
     def _press_char(self, key: Key) -> None:
-        ch = key.caption(self.shifted(key), self.altgr_active)
+        shifted = self.shifted(key)
+        ch = key.caption(shifted, self.altgr_active)
         if not ch:
             return
         mods = self._chord_modifiers()
@@ -165,10 +172,40 @@ class KeyController(QObject):
             self.context_changed.emit()
             return
 
-        sendinput.send_text(ch)
-        self.engine.on_text(ch)
+        # A full stop after an accepted word lands on the space auto-space put
+        # there. Take it back out rather than making the user do it.
+        if self.engine.plan_punctuation(ch):
+            sendinput.send_named("backspace")
+            self.engine.on_backspace()
+
+        # Only when no modifier is in play. Shift and Caps Lock are the user
+        # saying what case they want, and a convenience that overrides them is
+        # not a convenience -- Shift with Caps Lock on has to be able to produce
+        # a small letter even at the start of a sentence.
+        if (self.auto_capitals and key.is_letter and not self.shift.active
+                and not self.caps_lock and self.engine.at_sentence_start):
+            ch = ch.upper()
+
+        trailing = self._space_after(ch)
+        sendinput.send_text(ch + trailing)
+        self.engine.on_text(ch + trailing, auto_space=bool(trailing))
         self._consume_modifiers()
         self.context_changed.emit()
+
+    def _space_after(self, ch: str) -> str:
+        """The space that follows sentence punctuation, if it should follow it.
+
+        Only after a letter: "3.14" and "14:30" must be left alone, and the
+        character before the stop is what tells the two apart. Also only for
+        punctuation that ends a clause -- a closing bracket may well be
+        followed by more of the same.
+        """
+        if not (self.auto_punctuation and self.engine.auto_space):
+            return ""
+        if ch not in ".,!?;:":
+            return ""
+        buffer = self.engine.buffer
+        return " " if buffer[-1:].isalpha() else ""
 
     def _press_action(self, key: Key) -> None:
         action = key.action
@@ -207,13 +244,20 @@ class KeyController(QObject):
 
     # -- predictions -------------------------------------------------------
 
+    def accept_sentence(self, text: str) -> None:
+        """Write a whole recalled sentence in place of the one being typed."""
+        self._apply(self.engine.plan_sentence(text))
+
     def accept_suggestion(self, word: str) -> None:
         """Replace the half-typed word with a chosen prediction."""
-        plan = self.engine.plan_accept(word)
+        self._apply(self.engine.plan_accept(word))
+
+    def _apply(self, plan: AcceptPlan) -> None:
+        """Carry out an accept plan: delete this much, then type this."""
         for _ in range(plan.backspaces):
             sendinput.send_named("backspace")
             self.engine.on_backspace()
         if plan.text:
             sendinput.send_text(plan.text)
-            self.engine.on_text(plan.text)
+            self.engine.on_text(plan.text, auto_space=plan.auto_space)
         self.context_changed.emit()

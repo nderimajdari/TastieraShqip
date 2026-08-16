@@ -34,6 +34,7 @@ from ..winapi.hooks import OutsideClickWatcher
 from . import theme
 from .backlight import Backlight
 from .keypanel import UnitGrid
+from .sentencebar import SentencePanel
 from .suggestbar import SuggestionBar, band_height
 
 FOCUS_POLL_MS = 350
@@ -167,6 +168,14 @@ class KeyboardWindow(QWidget):
         body.addWidget(self.main_grid, int(albanian.MAIN_WIDTH_UNITS))
         body.addWidget(self.nav_grid, int(albanian.NAV_WIDTH_UNITS))
         root.addLayout(body, 1)
+        self._body_layout = body
+
+        # A sheet over the keys rather than a band above them: six sentence rows
+        # would otherwise take a third of the window permanently, for something
+        # wanted a few times a minute. Not in the layout at all -- it is placed
+        # over the key area by hand when it opens, and costs nothing when shut.
+        self.sentence_panel = SentencePanel(self.settings.sentence_count, self)
+        self.sentence_panel.hide()
 
         # The backlight is one layer rather than something each key draws, and
         # it lives in its own widget so that a frame of the wave repaints only
@@ -240,6 +249,9 @@ class KeyboardWindow(QWidget):
             grid.repeated.connect(self._on_key)
         self.suggestions.picked.connect(self._on_suggestion)
         self.suggestions.zoom_requested.connect(self._zoom_suggestions)
+        self.suggestions.sentences_requested.connect(self.toggle_sentences)
+        self.sentence_panel.picked.connect(self._on_sentence)
+        self.sentence_panel.closed.connect(self.hide_sentences)
         self.controller.context_changed.connect(self.refresh_suggestions)
         self.controller.modifiers_changed.connect(self._sync_modifiers)
         self.controller.system_action.connect(self._on_system_action)
@@ -274,10 +286,29 @@ class KeyboardWindow(QWidget):
         self.suggestions.configure_dwell(s.dwell_enabled, s.dwell_ms)
         self.suggestions.set_metrics(s.suggestion_font_scale, s.suggestion_height)
         self.suggestions.setVisible(s.prediction_enabled)
+        self.suggestions.sentences_button.setVisible(s.sentence_suggestions)
         self.nav_grid.setVisible(s.nav_visible)
+
+        self.sentence_panel.set_row_count(s.sentence_count)
+        self.sentence_panel.configure_dwell(s.dwell_enabled, s.dwell_ms)
+        # Sized from the suggestion scale, plus a half again: the rows are the
+        # biggest targets on the board and the sentences on them are the longest
+        # text, so what suits a one-word chip is too small here.
+        self.sentence_panel.set_metrics(s.suggestion_font_scale,
+                                        int(s.suggestion_height * 1.25))
+        self.sentence_panel.restyle()
+        if not s.sentence_suggestions:
+            self.hide_sentences()
+        elif self.sentence_panel.isVisible():
+            self._place_sentence_panel()
 
         self.engine.auto_space = s.auto_space
         self.engine.learn = s.learn_from_typing
+        self.engine.phrases = s.phrase_suggestions
+        self.engine.learn_sentences = (s.learn_from_typing
+                                       and s.sentence_suggestions)
+        self.controller.auto_capitals = s.auto_capitals
+        self.controller.auto_punctuation = s.auto_punctuation
 
         self.setWindowOpacity(s.faded_opacity if self._faded else s.opacity)
         self._sync_glow_timer()
@@ -325,9 +356,12 @@ class KeyboardWindow(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._refresh_glow_shape()
+        if self.sentence_panel.isVisible():
+            self._place_sentence_panel()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
+        self.hide_sentences()
         self._sync_glow_timer()
 
     def _restyle(self) -> None:
@@ -620,6 +654,53 @@ class KeyboardWindow(QWidget):
     def _on_suggestion(self, word: str) -> None:
         self.controller.accept_suggestion(word)
 
+    # -- whole sentences ---------------------------------------------------
+
+    def _on_sentence(self, text: str) -> None:
+        """Write a whole sentence, then get out of the way.
+
+        Closing straight after is not tidiness: the panel covers the keys, and
+        leaving it open would make every sentence cost a third press to dismiss
+        it before typing could go on.
+        """
+        self.controller.accept_sentence(text)
+        self.hide_sentences()
+
+    def toggle_sentences(self) -> None:
+        if self.sentence_panel.isVisible():
+            self.hide_sentences()
+        else:
+            self.show_sentences()
+
+    def show_sentences(self) -> None:
+        if not self.settings.sentence_suggestions:
+            return
+        self.sentence_panel.set_sentences(
+            self.engine.sentence_suggestions(self.sentence_panel.capacity))
+        self._place_sentence_panel()
+        self.sentence_panel.show()
+        self.sentence_panel.raise_()
+
+    def hide_sentences(self) -> None:
+        self.sentence_panel.hide()
+
+    def _place_sentence_panel(self) -> None:
+        """Cover the keys, and no more of the window than that.
+
+        The suggestion rows stay visible above it deliberately: a user who opens
+        the panel and finds nothing should be able to see the ordinary word
+        predictions without shutting it first.
+        """
+        top = self.main_grid.geometry().top()
+        left = MARGIN + 5
+        right = self.width() - MARGIN - 5
+        bottom = self.height() - MARGIN - 4
+        available = max(80, bottom - top)
+        self.sentence_panel.fit_to(available)
+        # Only as much of the keyboard as the sentences actually need.
+        height = min(available, self.sentence_panel.wanted_height())
+        self.sentence_panel.setGeometry(left, top, right - left, height)
+
     def _sync_modifiers(self) -> None:
         c = self.controller
         shift, altgr, caps = c.shift_active, c.altgr_active, c.caps_lock
@@ -638,6 +719,18 @@ class KeyboardWindow(QWidget):
         words = self.engine.suggestions(self.suggestions.capacity)
         self.suggestions.set_suggestions(words)
         self.suggestions.set_context(self.engine.buffer)
+        self._refresh_sentences()
+
+    def _refresh_sentences(self) -> None:
+        """Keep the sentence count, and any open panel, in step with the text."""
+        if not self.settings.sentence_suggestions:
+            self.suggestions.set_sentence_count(0)
+            return
+        found = self.engine.sentence_suggestions(self.sentence_panel.capacity)
+        self.suggestions.set_sentence_count(len(found))
+        if self.sentence_panel.isVisible():
+            self.sentence_panel.set_sentences(found)
+            self._place_sentence_panel()   # it is sized to what is in it
 
     # -- system actions ----------------------------------------------------
 
