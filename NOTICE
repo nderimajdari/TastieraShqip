@@ -1,0 +1,59 @@
+Tastiera Shqip — Albanian on-screen keyboard with word prediction
+Copyright 2026 QATelligence Development
+
+This product includes software developed by QATelligence Development,
+licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+
+-------------------------------------------------------------------------------
+THE BUNDLED LANGUAGE MODEL IS NOT COVERED BY THE APACHE LICENSE
+-------------------------------------------------------------------------------
+
+    osk/prediction/data/model_sq.pkl.gz
+
+This file is not source code. It is a statistical model — word, bigram and
+trigram counts — derived from third-party Albanian corpora, and it is
+redistributed here under the terms those corpora carry. The Apache License
+above applies to the software; it cannot and does not relicense this data.
+
+The corpora used to build it, as published by their maintainers:
+
+  * Leipzig Corpora Collection (sqi_news_2020_300K, sqi_wikipedia_2021_300K)
+    Universität Leipzig — https://wortschatz.uni-leipzig.de/en/download/Albanian
+    Creative Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0).
+    Attribution required; commercial use not permitted.
+
+  * OPUS OpenSubtitles — https://opus.nlpl.eu/OpenSubtitles.php
+    Compiled from opensubtitles.org. OPUS distributes the corpus freely for
+    research and development; copyright in the underlying subtitles rests with
+    their authors and is not granted by OPUS. Cite: P. Lison and J. Tiedemann,
+    "OpenSubtitles2016: Extracting Large Parallel Corpora from Movie and TV
+    Subtitles", LREC 2016.
+
+  * FrequencyWords — https://github.com/hermitdave/FrequencyWords
+    Hermit Dave. Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0).
+    Attribution required; derivative works must be shared under the same terms.
+
+Taken together these are the binding terms on the bundled model file:
+attribution, non-commercial use, and share-alike. In practice that means the
+keyboard as shipped — model included — is free to use, study, modify and pass
+on, but not to sell or fold into a commercial product.
+
+The software itself carries none of those restrictions. Anyone who needs the
+keyboard for commercial use can rebuild the model from corpora of their own
+choosing and ship that instead: tools/train.py takes plain one-sentence-per-line
+text, and the procedure is documented in README.md. Nothing in the code depends
+on which corpus the model came from.
+
+Any redistribution of this work, in whole or in part, must carry this notice.
+
+
+-------------------------------------------------------------------------------
+OTHER THIRD-PARTY COMPONENTS
+-------------------------------------------------------------------------------
+
+  * PySide6 / Qt for Python — The Qt Company.
+    LGPL v3 as used here (dynamically linked, unmodified), with Qt itself under
+    LGPL v3. See https://doc.qt.io/qtforpython/licenses.html. PySide6 is a
+    runtime dependency declared in requirements.txt; it is not redistributed
+    with this source tree.

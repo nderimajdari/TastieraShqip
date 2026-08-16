@@ -461,3 +461,17 @@ treated with more care than the dictionary: a sentence containing a run of six
 or more digits is never recorded, and both stores can be emptied from Options —
 the words under **Parashikimi i fjalëve**, the sentences under **Fjalitë e
 plota**. Turning off *Mëso nga fjalët që shkruaj* stops both.
+
+## Licence
+
+The software is under the **Apache License 2.0** — see [LICENSE](LICENSE). Use
+it, change it, ship it; keep the notices and mark the files you changed.
+
+The bundled model, `osk/prediction/data/model_sq.pkl.gz`, is a separate matter
+and is **not** covered by that licence. It is built from the Leipzig Corpora
+(CC BY-NC 4.0), OPUS OpenSubtitles and FrequencyWords (CC BY-SA 4.0), and it
+keeps their terms: attribution, non-commercial, share-alike. So the keyboard as
+shipped is free to use and pass on but not to sell. The code carries none of
+that — anyone needing it commercially can retrain on corpora of their own
+(see [Retraining the model](#retraining-the-model)) and nothing else changes.
+The full statement, which must travel with any copy, is in [NOTICE](NOTICE).
